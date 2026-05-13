@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Enum;
+using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Parser.Processor;
 using N_m3u8DL_RE.Parser.Processor.DASH;
 using N_m3u8DL_RE.Parser.Processor.HLS;
@@ -55,7 +55,7 @@ public class ParserConfig
     /// 如果 AppendUrlParams=false，得 http://xxx.com/clip_01.ts
     /// 如果 AppendUrlParams=true，得 http://xxx.com/clip_01.ts?hmac=xxx&token=xxx
     /// </summary>
-    public bool AppendUrlParams { get; set; } = false;
+    public bool AppendUrlParams { get; set; } = true;
 
     /// <summary>
     /// 此参数将会传递给URL Processor中

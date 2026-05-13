@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Common.Resource;
+namespace N_m3u8DL_RE.Common.Resource;
 
 public static class ResString
 {
@@ -90,6 +90,7 @@ public static class ResString
     public static string cmd_taskStartAt => GetText("cmd_taskStartAt");
     public static string cmd_liveWaitTime => GetText("cmd_liveWaitTime");
     public static string cmd_liveTakeCount => GetText("cmd_liveTakeCount");
+    public static string cmd_liveHostMirror => GetText("cmd_liveHostMirror");
     public static string cmd_liveFixVttByAudio => GetText("cmd_liveFixVttByAudio");
     public static string cmd_liveRealTimeMerge => GetText("cmd_liveRealTimeMerge");
     public static string cmd_livePerformAsVod => GetText("cmd_livePerformAsVod");

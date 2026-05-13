@@ -20,6 +20,7 @@ mono_crash.*
 Properties/
 
 # Build results
+artifact-*/
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/

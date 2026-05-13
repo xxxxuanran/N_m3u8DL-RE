@@ -53,11 +53,11 @@ internal static partial class CommandInvoker
     private static readonly Option<bool> NoDateInfo = new Option<bool>("--no-date-info") { Description = ResString.cmd_noDateInfo }.WithDefault(false);
     private static readonly Option<bool> BinaryMerge = new Option<bool>("--binary-merge") { Description = ResString.cmd_binaryMerge }.WithDefault(false);
     private static readonly Option<bool> UseFFmpegConcatDemuxer = new Option<bool>("--use-ffmpeg-concat-demuxer") { Description = ResString.cmd_useFFmpegConcatDemuxer }.WithDefault(false);
-    private static readonly Option<bool> DelAfterDone = new Option<bool>("--del-after-done") { Description = ResString.cmd_delAfterDone }.WithDefault(true);
+    private static readonly Option<bool> DelAfterDone = new Option<bool>("--del-after-done") { Description = ResString.cmd_delAfterDone }.WithDefault(false);
     private static readonly Option<bool> AutoSubtitleFix = new Option<bool>("--auto-subtitle-fix") { Description = ResString.cmd_subtitleFix }.WithDefault(true);
     private static readonly Option<bool> CheckSegmentsCount = new Option<bool>("--check-segments-count") { Description = ResString.cmd_checkSegmentsCount }.WithDefault(true);
     private static readonly Option<bool> WriteMetaJson = new Option<bool>("--write-meta-json") { Description = ResString.cmd_writeMetaJson }.WithDefault(true);
-    private static readonly Option<bool> AppendUrlParams = new Option<bool>("--append-url-params") { Description = ResString.cmd_appendUrlParams }.WithDefault(false);
+    private static readonly Option<bool> AppendUrlParams = new Option<bool>("--append-url-params") { Description = ResString.cmd_appendUrlParams }.WithDefault(true);
     private static readonly Option<bool> MP4RealTimeDecryption = new Option<bool>("--mp4-real-time-decryption") { Description = ResString.cmd_MP4RealTimeDecryption }.WithDefault(false);
     private static readonly Option<bool> UseShakaPackager = new Option<bool>("--use-shaka-packager") { Hidden = true, Description = ResString.cmd_useShakaPackager }.WithDefault(false);
     private static readonly Option<DecryptEngine> DecryptionEngine = new ("--decryption-engine") { Description = ResString.cmd_decryptionEngine, DefaultValueFactory = _ => DecryptEngine.MP4DECRYPT };
@@ -103,6 +103,13 @@ internal static partial class CommandInvoker
     private static readonly Option<int?> LiveWaitTime = new("--live-wait-time") { HelpName = "SEC", Description = ResString.cmd_liveWaitTime };
     private static readonly Option<int> LiveTakeCount = new("--live-take-count") { HelpName = "NUM", Description = ResString.cmd_liveTakeCount, DefaultValueFactory = _ => 16 };
     private static readonly Option<bool> LiveFixVttByAudio = new Option<bool>("--live-fix-vtt-by-audio") { Description = ResString.cmd_liveFixVttByAudio }.WithDefault(false);
+    private static readonly Option<string[]?> LiveHostMirror = new("--live-host-mirror")
+    {
+        HelpName = "HOST",
+        Arity = ArgumentArity.OneOrMore,
+        AllowMultipleArgumentsPerToken = false,
+        Description = ResString.cmd_liveHostMirror,
+    };
 
 
     // 复杂命令行如下
@@ -667,6 +674,7 @@ internal static partial class CommandInvoker
             CustomRange = result.GetValue(CustomRange),
             LiveWaitTime = result.GetValue(LiveWaitTime),
             LiveTakeCount = result.GetValue(LiveTakeCount),
+            LiveHostMirrors = result.GetValue(LiveHostMirror),
             NoDateInfo = result.GetValue(NoDateInfo),
             NoLog = result.GetValue(NoLog),
             AllowHlsMultiExtMap = result.GetValue(AllowHlsMultiExtMap),
@@ -732,7 +740,7 @@ internal static partial class CommandInvoker
             MaxSpeed,
             MuxAfterDone,
             CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, CustomRange, TaskStartAt,
-            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveRecordLimit, LiveWaitTime, LiveTakeCount,
+            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount,
             MuxImports, VideoFilter, AudioFilter, SubtitleFilter, DropVideoFilter, DropAudioFilter, DropSubtitleFilter, AdKeywords, DisableUpdateCheck, AllowHlsMultiExtMap, MoreHelp
         };
 

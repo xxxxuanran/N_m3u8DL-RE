@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Enum;
+using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Entity;
 using N_m3u8DL_RE.Enum;
@@ -265,6 +265,10 @@ internal class MyOption
     /// See: <see cref="CommandInvoker.LiveTakeCount"/>.
     /// </summary>
     public int LiveTakeCount { get; set; }
+    /// <summary>
+    /// See: <see cref="CommandInvoker.LiveHostMirror"/>.
+    /// </summary>
+    public string[]? LiveHostMirrors { get; set; }
     public MuxOptions? MuxOptions { get; set; }
     // public bool LiveWriteHLS { get; set; } = true;
     /// <summary>

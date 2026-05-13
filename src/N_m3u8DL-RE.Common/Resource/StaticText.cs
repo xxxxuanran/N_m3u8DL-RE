@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Common.Resource;
+namespace N_m3u8DL_RE.Common.Resource;
 
 internal static class StaticText
 {
@@ -435,6 +435,12 @@ internal static class StaticText
             zhCN: "手动设置录制直播时首次获取分片的数量",
             zhTW: "手動設置錄製直播時首次獲取分片的數量",
             enUS: "Manually set the number of segments downloaded for the first time when recording live"
+        ),
+        ["cmd_liveHostMirror"] = new TextContainer
+        (
+            zhCN: "录制直播时额外镜像 host；每个分片同时从主 URL 与各镜像拉取，采用最先成功完成的副本。可重复指定。支持 hostname、host:port 或完整 http(s) URL。",
+            zhTW: "錄製直播時額外鏡像 host；每個分片同時從主 URL 與各鏡像拉取，採用最先成功完成的副本。可重複指定。支援 hostname、host:port 或完整 http(s) URL。",
+            enUS: "Extra mirror host(s) for live recording: each segment is fetched concurrently from the primary URL and mirrors; the first successful completion wins. Repeatable. Accepts hostname, host:port, or full http(s) URL."
         ),
         ["cmd_customHLSMethod"] = new TextContainer
         (

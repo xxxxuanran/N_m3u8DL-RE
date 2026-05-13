@@ -1,4 +1,4 @@
-﻿using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.CodeAnalysis;
 using N_m3u8DL_RE.Parser.Config;
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Log;
@@ -56,7 +56,7 @@ public class StreamExtractor
         LoadSourceFromText(this.rawText);
     }
 
-    [MemberNotNull(nameof(this.rawText), nameof(this.extractor))]
+    [MemberNotNull(nameof(rawText), nameof(extractor))]
     private void LoadSourceFromText(string rawText)
     {
         var rawType = "txt";
