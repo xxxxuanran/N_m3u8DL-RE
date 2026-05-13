@@ -283,4 +283,12 @@ internal class MyOption
     /// See: <see cref="CommandInvoker.LiveFixVttByAudio"/>.
     /// </summary>
     public bool LiveFixVttByAudio { get; set; }
+    /// <summary>
+    /// See: <see cref="CommandInvoker.LiveFillSegmentsGap"/>.
+    /// </summary>
+    public bool LiveFillSegmentsGap { get; set; } = true;
+    /// <summary>
+    /// See: <see cref="CommandInvoker.LiveFillSegmentsGapMax"/>.
+    /// </summary>
+    public long LiveFillSegmentsGapMax { get; set; } = 100L;
 }

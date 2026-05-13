@@ -93,6 +93,8 @@ public static class ResString
     public static string cmd_liveTakeCount => GetText("cmd_liveTakeCount");
     public static string cmd_liveHostMirror => GetText("cmd_liveHostMirror");
     public static string cmd_liveFixVttByAudio => GetText("cmd_liveFixVttByAudio");
+    public static string cmd_liveFillSegmentsGap => GetText("cmd_liveFillSegmentsGap");
+    public static string cmd_liveFillSegmentsGapMax => GetText("cmd_liveFillSegmentsGapMax");
     public static string cmd_liveRealTimeMerge => GetText("cmd_liveRealTimeMerge");
     public static string cmd_livePerformAsVod => GetText("cmd_livePerformAsVod");
     public static string cmd_muxAfterDone => GetText("cmd_muxAfterDone");

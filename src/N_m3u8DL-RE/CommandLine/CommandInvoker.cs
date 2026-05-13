@@ -104,6 +104,8 @@ internal static partial class CommandInvoker
     private static readonly Option<int?> LiveWaitTime = new("--live-wait-time") { HelpName = "SEC", Description = ResString.cmd_liveWaitTime };
     private static readonly Option<int> LiveTakeCount = new("--live-take-count") { HelpName = "NUM", Description = ResString.cmd_liveTakeCount, DefaultValueFactory = _ => 16 };
     private static readonly Option<bool> LiveFixVttByAudio = new Option<bool>("--live-fix-vtt-by-audio") { Description = ResString.cmd_liveFixVttByAudio }.WithDefault(false);
+    private static readonly Option<bool> LiveFillSegmentsGap = new Option<bool>("--live-fill-segments-gap") { Description = ResString.cmd_liveFillSegmentsGap }.WithDefault(true);
+    private static readonly Option<long> LiveFillSegmentsGapMax = new("--live-fill-segments-gap-max") { HelpName = "NUM", Description = ResString.cmd_liveFillSegmentsGapMax, DefaultValueFactory = _ => 100L };
     private static readonly Option<string[]?> LiveHostMirror = new("--live-host-mirror")
     {
         HelpName = "HOST",
@@ -676,6 +678,8 @@ internal static partial class CommandInvoker
             LiveWaitTime = result.GetValue(LiveWaitTime),
             LiveTakeCount = result.GetValue(LiveTakeCount),
             LiveHostMirrors = result.GetValue(LiveHostMirror),
+            LiveFillSegmentsGap = result.GetValue(LiveFillSegmentsGap),
+            LiveFillSegmentsGapMax = result.GetValue(LiveFillSegmentsGapMax),
             NoDateInfo = result.GetValue(NoDateInfo),
             NoLog = result.GetValue(NoLog),
             LogFileOnly = result.GetValue(LogFileOnly),
@@ -742,7 +746,7 @@ internal static partial class CommandInvoker
             MaxSpeed,
             MuxAfterDone,
             CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, CustomRange, TaskStartAt,
-            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount,
+            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveFillSegmentsGap, LiveFillSegmentsGapMax,
             MuxImports, VideoFilter, AudioFilter, SubtitleFilter, DropVideoFilter, DropAudioFilter, DropSubtitleFilter, AdKeywords, DisableUpdateCheck, AllowHlsMultiExtMap, MoreHelp
         };
 

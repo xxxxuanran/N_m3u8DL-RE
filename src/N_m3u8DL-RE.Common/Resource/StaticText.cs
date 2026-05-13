@@ -256,6 +256,18 @@ internal static class StaticText
             zhTW: "透過讀取音訊檔案的起始時間修正VTT字幕",
             enUS: "Correct VTT sub by reading the start time of the audio file"
         ),
+        ["cmd_liveFillSegmentsGap"] = new TextContainer
+        (
+            zhCN: "录制直播刷新播放列表出现间隙时，按可预测的连续数字命名规律自动补齐缺失的分片",
+            zhTW: "錄製直播刷新播放列表出現間隙時，按可預測的連續數字命名規律自動補齊缺失的分片",
+            enUS: "Auto-fill missing segments by predictable numeric naming pattern when the live playlist refreshes with gaps"
+        ),
+        ["cmd_liveFillSegmentsGapMax"] = new TextContainer
+        (
+            zhCN: "录制直播自动补齐缺失分片时允许补齐的最大数量",
+            zhTW: "錄製直播自動補齊缺失分片時允許補齊的最大數量",
+            enUS: "Maximum number of missing segments allowed when auto-filling segment gaps during live recording"
+        ),
         ["cmd_header"] = new TextContainer
         (
             zhCN: "为HTTP请求设置特定的请求头, 例如:\r\n-H \"Cookie: mycookie\" -H \"User-Agent: iOS\"",

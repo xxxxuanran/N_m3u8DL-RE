@@ -768,6 +768,132 @@ internal class SimpleLiveRecordManager2
             }
             streamSpec.Playlist!.MediaParts[0].MediaSegments = list;
         }
+        else if (DownloaderConfig.MyOptions.LiveFillSegmentsGap)
+        {
+            // lastName 在新 playlist 中找不到 -> 尝试按可预测命名规律补齐中间缺失的 segment
+            // 典型场景：B 站直播这类 fmp4 流，文件名为连续递增的数字（与 EXT-X-MEDIA-SEQUENCE 一致），
+            // 当刷新间隔过长时新 playlist 起点已经跳到上次最后下载片段之后多个位置。
+            TryFillMissingSegments(streamSpec, task);
+        }
+    }
+
+    /// <summary>
+    /// 尝试基于可预测的文件名规律补齐 playlist 中间缺失的 segment
+    /// 触发条件（全部满足）：
+    ///   1. 新 playlist 至少有 2 个 segment
+    ///   2. 新 playlist 所有 segment 的 Index 严格连续（差值 1）
+    ///   3. 新 playlist 所有 segment 的 URL 文件名（去除扩展名）是纯数字且与 Index 相等
+    ///   4. 所有 segment 加密方式相同
+    ///   5. 上次记录的 LastFileName 也是纯数字且与 MaxIndexDic 一致
+    ///   6. 新 playlist 首个 segment 的 Index 严格大于 MaxIndexDic + 1（存在间隙）
+    ///   7. 缺失数量不超过上限（防止过度补齐）
+    /// </summary>
+    private void TryFillMissingSegments(StreamSpec streamSpec, ProgressTask task)
+    {
+        var newSegments = streamSpec.Playlist!.MediaParts[0].MediaSegments;
+        if (newSegments.Count < 2) return;
+
+        var oldMax = MaxIndexDic[task.Id];
+        var firstNew = newSegments[0];
+        var firstNewIndex = firstNew.Index;
+
+        // 必须存在间隙
+        if (firstNewIndex <= oldMax + 1) return;
+
+        // 校验 LastFileName 也是纯数字且与 oldMax 一致
+        if (!long.TryParse(LastFileNameDic[task.Id], out var lastNumber) || lastNumber != oldMax)
+            return;
+
+        // 验证所有 segment 都符合"连续数字命名"模式
+        var encryptMethod = firstNew.EncryptInfo.Method;
+        for (var i = 0; i < newSegments.Count; i++)
+        {
+            var seg = newSegments[i];
+            if (i > 0 && seg.Index != newSegments[i - 1].Index + 1) return;
+            if (seg.EncryptInfo.Method != encryptMethod) return;
+            var fileNameNoExt = GetUrlFileNameWithoutExtension(seg.Url);
+            if (!long.TryParse(fileNameNoExt, out var num) || num != seg.Index) return;
+        }
+
+        var missingCount = firstNewIndex - oldMax - 1;
+        var maxFill = DownloaderConfig.MyOptions.LiveFillSegmentsGapMax;
+        if (missingCount > maxFill)
+        {
+            Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segments which exceeds max fill limit ({maxFill}). Skipping fill.[/]");
+            return;
+        }
+
+        // 以首个新 segment 为模板克隆缺失片段
+        var template = firstNew;
+        var fileExt = GetUrlFileExtension(template.Url);
+        var fillList = new List<MediaSegment>((int)missingCount);
+        for (var idx = oldMax + 1; idx < firstNewIndex; idx++)
+        {
+            var newUrl = ReplaceUrlFileName(template.Url, idx.ToString(), fileExt);
+            if (newUrl == null) return;
+
+            var seg = new MediaSegment
+            {
+                Index = idx,
+                Duration = template.Duration,
+                Title = template.Title,
+                DateTime = template.DateTime?.AddSeconds(-(firstNewIndex - idx) * template.Duration),
+                StartRange = template.StartRange,
+                ExpectLength = template.ExpectLength,
+                Url = newUrl,
+                NameFromVar = null, // 强制按 URL 推导文件名
+                EncryptInfo = new EncryptInfo
+                {
+                    Method = template.EncryptInfo.Method,
+                    Key = template.EncryptInfo.Key,
+                    IV = template.EncryptInfo.IV != null ? (byte[])template.EncryptInfo.IV.Clone() : null,
+                },
+            };
+            fillList.Add(seg);
+        }
+
+        if (fillList.Count == 0) return;
+
+        Logger.WarnMarkUp($"[darkorange3_1]Detected {fillList.Count} missing segment(s), filling: {fillList[0].Index} ~ {fillList[^1].Index}[/]");
+        streamSpec.Playlist!.MediaParts[0].MediaSegments = fillList.Concat(newSegments).ToList();
+    }
+
+    /// <summary>
+    /// 从 URL 中取最后一段文件名（去除扩展名与 query）
+    /// </summary>
+    private static string GetUrlFileNameWithoutExtension(string url)
+    {
+        var path = url.Split('?')[0];
+        var slash = path.LastIndexOf('/');
+        var name = slash >= 0 ? path[(slash + 1)..] : path;
+        var dot = name.LastIndexOf('.');
+        return dot >= 0 ? name[..dot] : name;
+    }
+
+    /// <summary>
+    /// 从 URL 中取文件扩展名（含点号，无扩展名时返回空字符串）
+    /// </summary>
+    private static string GetUrlFileExtension(string url)
+    {
+        var path = url.Split('?')[0];
+        var slash = path.LastIndexOf('/');
+        var name = slash >= 0 ? path[(slash + 1)..] : path;
+        var dot = name.LastIndexOf('.');
+        return dot >= 0 ? name[dot..] : string.Empty;
+    }
+
+    /// <summary>
+    /// 将 URL 中文件名部分替换为新文件名，保留 query string
+    /// </summary>
+    private static string? ReplaceUrlFileName(string url, string newFileNameNoExt, string ext)
+    {
+        var questionIdx = url.IndexOf('?');
+        var path = questionIdx >= 0 ? url[..questionIdx] : url;
+        var query = questionIdx >= 0 ? url[questionIdx..] : string.Empty;
+        var lastSlash = path.LastIndexOf('/');
+        if (lastSlash < 0) return null;
+
+        return path[..(lastSlash + 1)] + newFileNameNoExt + ext + query;
     }
 
     public async Task<bool> StartRecordAsync()
