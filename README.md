@@ -61,6 +61,7 @@ Options:
   --del-after-done                                        完成后删除临时文件 [default: True]
   --no-date-info                                          混流时不写入日期信息 [default: False]
   --no-log                                                关闭日志文件输出 [default: False]
+  --log-file-only                                         仅将日志输出到文件，不输出到终端 [default: False]
   --write-meta-json                                       解析后的信息是否输出json文件 [default: True]
   --append-url-params                                     将输入Url的Params添加至分片, 对某些网站很有用, 例如 kakao.com [default: False]
   -mt, --concurrent-download                              并发下载已选择的音频、视频和字幕 [default: False]

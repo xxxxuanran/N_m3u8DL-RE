@@ -1,4 +1,4 @@
-﻿using Spectre.Console;
+using Spectre.Console;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -18,6 +18,11 @@ public static partial class Logger
     /// 是否写出日志文件
     /// </summary>
     public static bool IsWriteFile { get; set; } = true;
+
+    /// <summary>
+    /// 是否输出日志到终端
+    /// </summary>
+    public static bool IsWriteConsole { get; set; } = true;
 
     /// <summary>
     /// 本次运行日志文件所在位置
@@ -74,11 +79,11 @@ public static partial class Logger
     {
         try
         {
-            if (subWrite == "")
+            if (IsWriteConsole && subWrite == "")
             {
                 CustomAnsiConsole.MarkupLine(write);
             }
-            else
+            else if (IsWriteConsole)
             {
                 CustomAnsiConsole.Markup(write);
                 Console.WriteLine(subWrite);
@@ -104,7 +109,10 @@ public static partial class Logger
         }
         catch (Exception)
         {
-            Console.WriteLine("Failed to write: " + write);
+            if (IsWriteConsole)
+            {
+                Console.WriteLine("Failed to write: " + write);
+            }
         }
     }
 

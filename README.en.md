@@ -56,6 +56,7 @@ Options:
   --del-after-done                                        Delete temporary files when done [default: True]
   --no-date-info                                          Date information is not written during muxing [default: False]
   --no-log                                                Disable log file output [default: False]
+  --log-file-only                                         Write logs only to file, not to terminal [default: False]
   --write-meta-json                                       Write meta json after parsed [default: True]
   --append-url-params                                     Add Params of input Url to segments, useful for some
                                                           websites, such as kakao.com [default: False]

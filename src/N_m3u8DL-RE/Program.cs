@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using N_m3u8DL_RE.Parser.Config;
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Enum;
@@ -76,6 +76,7 @@ internal class Program
     static async Task DoWorkAsync(MyOption option)
     {
         HTTPUtil.AppHttpClient.Timeout = TimeSpan.FromSeconds(option.HttpRequestTimeout);
+        Logger.IsWriteConsole = !option.LogFileOnly;
         if (Console.IsOutputRedirected || Console.IsErrorRedirected)
         {
             option.ForceAnsiConsole = true;

@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Parser.Config;
+using N_m3u8DL_RE.Parser.Config;
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.Log;
@@ -477,7 +477,7 @@ internal class HLSExtractor : IExtractor
             {
                 Url = ParserConfig.Url,
                 Playlist = playlist,
-                Extension = playlist.MediaInit != null ? "mp4" : "ts"
+                Extension = playlist.MediaInit != null ? "m4s" : "ts"
             }
         ];
     }

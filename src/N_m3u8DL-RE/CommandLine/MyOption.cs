@@ -53,6 +53,10 @@ internal class MyOption
     /// </summary>
     public bool NoLog { get; set; }
     /// <summary>
+    /// See: <see cref="CommandInvoker.LogFileOnly"/>.
+    /// </summary>
+    public bool LogFileOnly { get; set; }
+    /// <summary>
     /// See: <see cref="CommandInvoker.AllowHlsMultiExtMap"/>.
     /// </summary>
     public bool AllowHlsMultiExtMap { get; set; }

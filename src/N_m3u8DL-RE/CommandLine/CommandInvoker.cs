@@ -68,6 +68,7 @@ internal static partial class CommandInvoker
     private static readonly Option<string?> BaseUrl = new("--base-url") { Description = ResString.cmd_baseUrl };
     private static readonly Option<bool> ConcurrentDownload = new Option<bool>("-mt", "--concurrent-download") { Description = ResString.cmd_concurrentDownload }.WithDefault(false);
     private static readonly Option<bool> NoLog = new Option<bool>("--no-log") { Description = ResString.cmd_noLog }.WithDefault(false);
+    private static readonly Option<bool> LogFileOnly = new Option<bool>("--log-file-only") { Description = ResString.cmd_logFileOnly }.WithDefault(false);
     private static readonly Option<bool> AllowHlsMultiExtMap = new Option<bool>("--allow-hls-multi-ext-map") { Description = ResString.cmd_allowHlsMultiExtMap }.WithDefault(false);
     private static readonly Option<string[]?> AdKeywords = new("--ad-keyword") { HelpName = "REG", Description = ResString.cmd_adKeyword };
     private static readonly Option<long?> MaxSpeed = new("-R", "--max-speed") { HelpName = "SPEED", Description = ResString.cmd_maxSpeed, CustomParser = ParseSpeedLimit };
@@ -677,6 +678,7 @@ internal static partial class CommandInvoker
             LiveHostMirrors = result.GetValue(LiveHostMirror),
             NoDateInfo = result.GetValue(NoDateInfo),
             NoLog = result.GetValue(NoLog),
+            LogFileOnly = result.GetValue(LogFileOnly),
             AllowHlsMultiExtMap = result.GetValue(AllowHlsMultiExtMap),
             AdKeywords = result.GetValue(AdKeywords),
             MaxSpeed = result.GetValue(MaxSpeed),
@@ -734,7 +736,7 @@ internal static partial class CommandInvoker
         var rootCommand = new RootCommand(VERSION_INFO)
         {
             Input, TmpDir, SaveDir, SaveName, SavePattern, LogFilePath, BaseUrl, ThreadCount, DownloadRetryCount, HttpRequestTimeout, ForceAnsiConsole, NoAnsiColor,AutoSelect, SkipMerge, SkipDownload, CheckSegmentsCount,
-            BinaryMerge, UseFFmpegConcatDemuxer, DelAfterDone, NoDateInfo, NoLog, WriteMetaJson, AppendUrlParams, ConcurrentDownload, Headers, SubOnly, SubtitleFormat, AutoSubtitleFix,
+            BinaryMerge, UseFFmpegConcatDemuxer, DelAfterDone, NoDateInfo, NoLog, LogFileOnly, WriteMetaJson, AppendUrlParams, ConcurrentDownload, Headers, SubOnly, SubtitleFormat, AutoSubtitleFix,
             FFmpegBinaryPath,
             LogLevel, UILanguage, UrlProcessorArgs, Keys, KeyTextFile, DecryptionEngine, DecryptionBinaryPath, UseShakaPackager, MP4RealTimeDecryption,
             MaxSpeed,

@@ -67,6 +67,7 @@ public static class ResString
     public static string cmd_skipDownload => GetText("cmd_skipDownload");
     public static string cmd_noDateInfo => GetText("cmd_noDateInfo");
     public static string cmd_noLog => GetText("cmd_noLog");
+    public static string cmd_logFileOnly => GetText("cmd_logFileOnly");
     public static string cmd_allowHlsMultiExtMap => GetText("cmd_allowHlsMultiExtMap");
     public static string cmd_skipMerge => GetText("cmd_skipMerge");
     public static string cmd_subFormat => GetText("cmd_subFormat");

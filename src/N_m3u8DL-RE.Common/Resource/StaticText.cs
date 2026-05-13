@@ -166,6 +166,12 @@ internal static class StaticText
             zhTW: "關閉日誌文件輸出",
             enUS: "Disable log file output"
         ),
+        ["cmd_logFileOnly"] = new TextContainer
+        (
+            zhCN: "仅将日志输出到文件，不输出到终端",
+            zhTW: "僅將日誌輸出到檔案，不輸出到終端",
+            enUS: "Write logs only to file, not to terminal"
+        ),
         ["cmd_allowHlsMultiExtMap"] = new TextContainer
         (
             zhCN: "允许HLS中的多个#EXT-X-MAP(实验性)",
