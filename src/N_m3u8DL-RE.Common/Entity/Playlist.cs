@@ -17,6 +17,8 @@ public class Playlist
     public MediaSegment? MediaInit { get; set; }
     // 直播刷新时INIT是否发生变化
     public bool MediaInitChanged { get; set; } = false;
+    // 直播刷新时检测到的新INIT，旧录制会话收尾后再应用
+    public MediaSegment? PendingMediaInit { get; set; }
     // 分片信息
     public List<MediaPart> MediaParts { get; set; } = [];
 }

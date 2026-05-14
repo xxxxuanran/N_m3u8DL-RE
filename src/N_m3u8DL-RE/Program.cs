@@ -396,8 +396,17 @@ internal class Program
         }
         else
         {
-            var sldm = new SimpleLiveRecordManager2(downloadConfig, selectedStreams, extractor);
-            result = await sldm.StartRecordAsync();
+            while (true)
+            {
+                var sldm = new SimpleLiveRecordManager2(downloadConfig, selectedStreams, extractor);
+                result = await sldm.StartRecordAsync();
+                if (!result || !sldm.ShouldRestartOnMediaInitChanged)
+                    break;
+
+                sldm.PrepareRestartAfterMediaInitChange();
+                await extractor.RefreshPlayListAsync(selectedStreams);
+                Logger.WarnMarkUp("[darkorange3_1]Restarting live recording with the refreshed EXT-X-MAP.[/]");
+            }
         }
 
         if (result)

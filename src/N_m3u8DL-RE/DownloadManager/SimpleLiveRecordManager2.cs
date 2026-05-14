@@ -43,6 +43,7 @@ internal class SimpleLiveRecordManager2
 
     private readonly Lock lockObj = new();
     TimeSpan? audioStart = null;
+    public bool ShouldRestartOnMediaInitChanged { get; private set; } = false;
 
     public SimpleLiveRecordManager2(DownloaderConfig downloaderConfig, List<StreamSpec> selectedSteams, StreamExtractor streamExtractor)
     {
@@ -51,6 +52,37 @@ internal class SimpleLiveRecordManager2
         PublishDateTime = selectedSteams.FirstOrDefault()?.PublishTime;
         StreamExtractor = streamExtractor;
         SelectedSteams = selectedSteams;
+    }
+
+    private void StopForMediaInitChange()
+    {
+        lock (lockObj)
+        {
+            if (STOP_FLAG) return;
+
+            ShouldRestartOnMediaInitChanged = true;
+            Logger.WarnMarkUp("[darkorange3_1]Detected EXT-X-MAP change. Will finish current output and start a new live recording file.[/]");
+            STOP_FLAG = true;
+            CancellationTokenSource.Cancel();
+        }
+    }
+
+    public void PrepareRestartAfterMediaInitChange()
+    {
+        foreach (var streamSpec in SelectedSteams)
+        {
+            var playlist = streamSpec.Playlist;
+            if (playlist == null) continue;
+
+            if (playlist.PendingMediaInit != null)
+            {
+                playlist.MediaInit = playlist.PendingMediaInit;
+                streamSpec.Extension = "m4s";
+            }
+
+            playlist.PendingMediaInit = null;
+            playlist.MediaInitChanged = false;
+        }
     }
 
     // 从文件读取KEY
@@ -679,6 +711,12 @@ internal class SimpleLiveRecordManager2
                     SamePathDic[task.Id] = allSamePath;
                 }
                 // 过滤不需要下载的片段
+                if (streamSpec.Playlist!.MediaInitChanged)
+                {
+                    StopForMediaInitChange();
+                    return;
+                }
+
                 FilterMediaSegments(streamSpec, task, allHasDatetime, SamePathDic[task.Id]);
                 if (STOP_FLAG)
                     return;
@@ -789,9 +827,7 @@ internal class SimpleLiveRecordManager2
             // 当刷新间隔过长时新 playlist 起点已经跳到上次最后下载片段之后多个位置。
             if (streamSpec.Playlist!.MediaInitChanged)
             {
-                Logger.WarnMarkUp("[darkorange3_1]Detected EXT-X-MAP change while filling missing segments, the live stream may have restarted. Will stop recording soon.[/]");
-                STOP_FLAG = true;
-                CancellationTokenSource.Cancel();
+                StopForMediaInitChange();
                 return;
             }
 

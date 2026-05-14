@@ -560,7 +560,9 @@ internal class HLSExtractor : IExtractor
             var newPlaylist = await ParseListAsync();
             if (lists[i].Playlist?.MediaInit != null)
             {
-                lists[i].Playlist!.MediaInitChanged = IsMediaInitChanged(lists[i].Playlist!.MediaInit!, newPlaylist.MediaInit);
+                var mediaInitChanged = IsMediaInitChanged(lists[i].Playlist!.MediaInit!, newPlaylist.MediaInit);
+                lists[i].Playlist!.MediaInitChanged = mediaInitChanged;
+                lists[i].Playlist!.PendingMediaInit = mediaInitChanged ? newPlaylist.MediaInit : null;
                 lists[i].Playlist!.MediaParts = newPlaylist.MediaParts; // 不更新init
             }
             else
