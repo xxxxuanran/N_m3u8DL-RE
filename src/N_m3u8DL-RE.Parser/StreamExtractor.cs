@@ -13,9 +13,9 @@ namespace N_m3u8DL_RE.Parser;
 public class StreamExtractor
 {
     public ExtractorType ExtractorType => extractor.ExtractorType;
-    private IExtractor extractor;
+    private IExtractor extractor = null!;
     private ParserConfig parserConfig = new();
-    private string rawText;
+    private string rawText = string.Empty;
     private static SemaphoreSlim semaphore = new(1, 1);
 
     public Dictionary<string, string> RawFiles { get; set; } = new(); // 存储（文件名,文件内容）

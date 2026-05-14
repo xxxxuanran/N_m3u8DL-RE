@@ -1,4 +1,5 @@
-﻿using N_m3u8DL_RE.Common.Entity;
+using N_m3u8DL_RE.Common.Entity;
+using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.JsonConverter;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -12,7 +13,15 @@ public static class GlobalUtil
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter(), new BytesBase64Converter() }
+        Converters =
+        {
+            new JsonStringEnumConverter<MediaType>(),
+            new JsonStringEnumConverter<EncryptMethod>(),
+            new JsonStringEnumConverter<ExtractorType>(),
+            new JsonStringEnumConverter<Choise>(),
+            new JsonStringEnumConverter<RoleType>(),
+            new BytesBase64Converter()
+        }
     };
     private static readonly JsonContext Context = new JsonContext(Options);
 

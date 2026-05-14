@@ -5,7 +5,6 @@
       <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
       <StaticallyLinked Condition="$(RuntimeIdentifier.StartsWith('win'))">true</StaticallyLinked>
       <TrimMode>full</TrimMode>
-      <TrimmerDefaultAction>link</TrimmerDefaultAction>
       <IlcTrimMetadata>true</IlcTrimMetadata>
       <IlcGenerateStackTraceData>true</IlcGenerateStackTraceData>
       <SatelliteResourceLanguages>zh-CN;zh-TW;en-US</SatelliteResourceLanguages>

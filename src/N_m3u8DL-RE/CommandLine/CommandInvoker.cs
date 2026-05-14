@@ -381,7 +381,7 @@ internal static partial class CommandInvoker
         {
             path = Path.GetFullPath(input);
         }
-        catch (Exception e)
+        catch (Exception)
         {
             result.AddError("Invalid log path!");
             return null;
@@ -649,7 +649,6 @@ internal static partial class CommandInvoker
             Keys = result.GetValue(Keys),
             UrlProcessorArgs = result.GetValue(UrlProcessorArgs),
             MP4RealTimeDecryption = result.GetValue(MP4RealTimeDecryption),
-            UseShakaPackager = result.GetValue(UseShakaPackager),
             DecryptionEngine = result.GetValue(DecryptionEngine),
             DecryptionBinaryPath = result.GetValue(DecryptionBinaryPath),
             FFmpegBinaryPath = result.GetValue(FFmpegBinaryPath),
@@ -687,6 +686,9 @@ internal static partial class CommandInvoker
             AdKeywords = result.GetValue(AdKeywords),
             MaxSpeed = result.GetValue(MaxSpeed),
         };
+
+        if (result.GetValue(UseShakaPackager))
+            option.DecryptionEngine = DecryptEngine.SHAKA_PACKAGER;
 
         if (result.HasOption(CustomHLSMethod)) option.CustomHLSMethod = result.GetValue(CustomHLSMethod);
         if (result.HasOption(CustomHLSKey)) option.CustomHLSKey = result.GetValue(CustomHLSKey);

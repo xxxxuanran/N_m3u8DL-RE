@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Entity;
+using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Common.Resource;
@@ -20,9 +20,9 @@ public class DefaultHLSKeyProcessor : KeyProcessor
         var method = ParserUtil.GetAttribute(keyLine, "METHOD");
         var uri = ParserUtil.GetAttribute(keyLine, "URI");
 
-        Logger.Debug("METHOD:{},URI:{},IV:{}", method, uri, iv);
+        Logger.Debug("METHOD:{},URI:{},IV:{}", method ?? "", uri ?? "", iv ?? "");
 
-        var encryptInfo = new EncryptInfo(method);
+        var encryptInfo = new EncryptInfo(method ?? "");
 
         // IV
         if (!string.IsNullOrEmpty(iv))
@@ -42,38 +42,41 @@ public class DefaultHLSKeyProcessor : KeyProcessor
             {
                 encryptInfo.Key = parserConfig.CustomeKey;
             }
-            else if (uri.ToLower().StartsWith("base64:"))
-            {
-                encryptInfo.Key = Convert.FromBase64String(uri[7..]);
-            }
-            else if (uri.ToLower().StartsWith("data:;base64,"))
-            {
-                encryptInfo.Key = Convert.FromBase64String(uri[13..]);
-            }
-            else if (uri.ToLower().StartsWith("data:text/plain;base64,"))
-            {
-                encryptInfo.Key = Convert.FromBase64String(uri[23..]);
-            }
-            else if (File.Exists(uri))
-            {
-                encryptInfo.Key = File.ReadAllBytes(uri);
-            }
             else if (!string.IsNullOrEmpty(uri))
             {
-                var retryCount = parserConfig.KeyRetryCount;
-                var segUrl = PreProcessUrl(ParserUtil.CombineURL(m3u8Url, uri), parserConfig);
-                getHttpKey:
-                try
+                if (uri.StartsWith("base64:", StringComparison.OrdinalIgnoreCase))
                 {
-                    var bytes = HTTPUtil.GetBytesAsync(segUrl, parserConfig.Headers).Result;
-                    encryptInfo.Key = bytes;
+                    encryptInfo.Key = Convert.FromBase64String(uri[7..]);
                 }
-                catch (Exception _ex) when (!_ex.Message.Contains("scheme is not supported."))
+                else if (uri.StartsWith("data:;base64,", StringComparison.OrdinalIgnoreCase))
                 {
-                    Logger.WarnMarkUp($"[grey]{_ex.Message.EscapeMarkup()} retryCount: {retryCount}[/]");
-                    Thread.Sleep(1000);
-                    if (retryCount-- > 0) goto getHttpKey;
-                    throw;
+                    encryptInfo.Key = Convert.FromBase64String(uri[13..]);
+                }
+                else if (uri.StartsWith("data:text/plain;base64,", StringComparison.OrdinalIgnoreCase))
+                {
+                    encryptInfo.Key = Convert.FromBase64String(uri[23..]);
+                }
+                else if (File.Exists(uri))
+                {
+                    encryptInfo.Key = File.ReadAllBytes(uri);
+                }
+                else
+                {
+                    var retryCount = parserConfig.KeyRetryCount;
+                    var segUrl = PreProcessUrl(ParserUtil.CombineURL(m3u8Url, uri), parserConfig);
+                    getHttpKey:
+                    try
+                    {
+                        var bytes = HTTPUtil.GetBytesAsync(segUrl, parserConfig.Headers).Result;
+                        encryptInfo.Key = bytes;
+                    }
+                    catch (Exception _ex) when (!_ex.Message.Contains("scheme is not supported."))
+                    {
+                        Logger.WarnMarkUp($"[grey]{_ex.Message.EscapeMarkup()} retryCount: {retryCount}[/]");
+                        Thread.Sleep(1000);
+                        if (retryCount-- > 0) goto getHttpKey;
+                        throw;
+                    }
                 }
             }
         }
@@ -87,7 +90,7 @@ public class DefaultHLSKeyProcessor : KeyProcessor
         
         // 处理自定义加密方式
         encryptInfo.Method = parserConfig.CustomMethod.Value;
-        Logger.Warn("METHOD changed from {} to {}", method, encryptInfo.Method);
+        Logger.Warn("METHOD changed from {} to {}", method ?? "", encryptInfo.Method);
 
         return encryptInfo;
     }

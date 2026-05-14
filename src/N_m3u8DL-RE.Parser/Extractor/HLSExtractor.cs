@@ -124,7 +124,7 @@ internal class HLSExtractor : IExtractor
             else if (line.StartsWith(HLSTags.ext_x_media))
             {
                 streamSpec = new();
-                var type = ParserUtil.GetAttribute(line, "TYPE").Replace("-", "_");
+                var type = (ParserUtil.GetAttribute(line, "TYPE") ?? "").Replace("-", "_");
                 if (Enum.TryParse<MediaType>(type, out var mediaType))
                 {
                     streamSpec.MediaType = mediaType;
@@ -249,7 +249,7 @@ internal class HLSExtractor : IExtractor
             if (line.StartsWith(HLSTags.ext_x_byterange))
             {
                 var p = ParserUtil.GetAttribute(line);
-                var (n, o) = ParserUtil.GetRange(p);
+                var (n, o) = ParserUtil.GetRange(p ?? "");
                 segment.ExpectLength = n;
                 segment.StartRange = o ?? segments.Last().StartRange + segments.Last().ExpectLength;
                 expectSegment = true;
@@ -285,7 +285,9 @@ internal class HLSExtractor : IExtractor
             // program date time
             else if (line.StartsWith(HLSTags.ext_x_program_date_time))
             {
-                segment.DateTime = DateTime.Parse(ParserUtil.GetAttribute(line));
+                var programDateTime = ParserUtil.GetAttribute(line);
+                if (!string.IsNullOrEmpty(programDateTime))
+                    segment.DateTime = DateTime.Parse(programDateTime);
             }
             // 解析不连续标记，需要单独合并（timestamp不同）
             else if (line.StartsWith(HLSTags.ext_x_discontinuity))
@@ -324,7 +326,7 @@ internal class HLSExtractor : IExtractor
             // 解析分片时长
             else if (line.StartsWith(HLSTags.extinf))
             {
-                string[] tmp = ParserUtil.GetAttribute(line).Split(',');
+                string[] tmp = (ParserUtil.GetAttribute(line) ?? "").Split(',');
                 segment.Duration = Convert.ToDouble(tmp[0]);
                 segment.Index = segIndex;
                 // 是否有加密，有的话写入KEY和IV
@@ -357,13 +359,13 @@ internal class HLSExtractor : IExtractor
                 {
                     playlist.MediaInit = new MediaSegment()
                     {
-                        Url = PreProcessUrl(ParserUtil.CombineURL(BaseUrl, ParserUtil.GetAttribute(line, "URI"))),
+                        Url = PreProcessUrl(ParserUtil.CombineURL(BaseUrl, ParserUtil.GetAttribute(line, "URI") ?? "")),
                         Index = -1, // 便于排序
                     };
                     if (line.Contains("BYTERANGE"))
                     {
                         var p = ParserUtil.GetAttribute(line, "BYTERANGE");
-                        var (n, o) = ParserUtil.GetRange(p);
+                        var (n, o) = ParserUtil.GetRange(p ?? "");
                         playlist.MediaInit.ExpectLength = n;
                         playlist.MediaInit.StartRange = o ?? 0L;
                     }

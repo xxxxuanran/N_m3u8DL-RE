@@ -208,7 +208,7 @@ internal class SimpleDownloader : IDownloader
             var segmentLabel = Path.GetFileNameWithoutExtension(path);
             if (string.IsNullOrEmpty(segmentLabel))
                 segmentLabel = Path.GetFileName(path);
-            Logger.DebugMarkUp($"[grey]race winner: {winnerHostForLog.EscapeMarkup()} filename({segmentLabel.EscapeMarkup()})[/]");
+            Logger.WarnMarkUp($"[grey]race winner: {winnerHostForLog.EscapeMarkup()} in file({segmentLabel.EscapeMarkup()})[/]");
         }
 
         return winnerResult;
