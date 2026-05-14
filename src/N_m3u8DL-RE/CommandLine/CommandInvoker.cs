@@ -79,6 +79,10 @@ internal static partial class CommandInvoker
     private static readonly Option<WebProxy?> CustomProxy = new("--custom-proxy") { HelpName = "URL", Description = ResString.cmd_customProxy, CustomParser = ParseProxy};
     private static readonly Option<bool> ForceIpv4 = new Option<bool>("-4", "--ipv4") { Description = ResString.cmd_forceIpv4 }.WithDefault(false);
     private static readonly Option<bool> ForceIpv6 = new Option<bool>("-6", "--ipv6") { Description = ResString.cmd_forceIpv6 }.WithDefault(false);
+    private static readonly Option<bool> Http10 = new Option<bool>("--http1.0") { Description = ResString.cmd_http10 }.WithDefault(false);
+    private static readonly Option<bool> Http11 = new Option<bool>("--http1.1") { Description = ResString.cmd_http11 }.WithDefault(false);
+    private static readonly Option<bool> Http2 = new Option<bool>("--http2") { Description = ResString.cmd_http2 }.WithDefault(true);
+    private static readonly Option<bool> Http2PriorKnowledge = new Option<bool>("--http2-prior-knowledge") { Description = ResString.cmd_http2PriorKnowledge }.WithDefault(false);
 
     // 只下载部分分片
     private static readonly Option<CustomRange?> CustomRange = new("--custom-range") { HelpName = "RANGE", Description = ResString.cmd_customRange, CustomParser = ParseCustomRange };
@@ -691,6 +695,27 @@ internal static partial class CommandInvoker
             MaxSpeed = result.GetValue(MaxSpeed),
         };
 
+        var effectiveHttpVersion = HttpVersionType.Http2;
+        foreach (var t in result.Tokens.Select(x => x.Value))
+        {
+            switch (t)
+            {
+                case "--http1.0":
+                    effectiveHttpVersion = HttpVersionType.Http10;
+                    break;
+                case "--http1.1":
+                    effectiveHttpVersion = HttpVersionType.Http11;
+                    break;
+                case "--http2":
+                    effectiveHttpVersion = HttpVersionType.Http2;
+                    break;
+                case "--http2-prior-knowledge":
+                    effectiveHttpVersion = HttpVersionType.Http2PriorKnowledge;
+                    break;
+            }
+        }
+        option.HttpVersion = effectiveHttpVersion;
+
         if (result.GetValue(UseShakaPackager))
             option.DecryptionEngine = DecryptEngine.SHAKA_PACKAGER;
 
@@ -751,7 +776,7 @@ internal static partial class CommandInvoker
             LogLevel, UILanguage, UrlProcessorArgs, Keys, KeyTextFile, DecryptionEngine, DecryptionBinaryPath, UseShakaPackager, MP4RealTimeDecryption,
             MaxSpeed,
             MuxAfterDone,
-            CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, ForceIpv4, ForceIpv6, CustomRange, TaskStartAt,
+            CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, ForceIpv4, ForceIpv6, Http10, Http11, Http2, Http2PriorKnowledge, CustomRange, TaskStartAt,
             LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveFillSegmentsGap, LiveFillSegmentsGapMax,
             MuxImports, VideoFilter, AudioFilter, SubtitleFilter, DropVideoFilter, DropAudioFilter, DropSubtitleFilter, AdKeywords, DisableUpdateCheck, AllowHlsMultiExtMap, MoreHelp
         };

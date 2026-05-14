@@ -85,6 +85,10 @@ public static class ResString
     public static string cmd_useSystemProxy => GetText("cmd_useSystemProxy");
     public static string cmd_forceIpv4 => GetText("cmd_forceIpv4");
     public static string cmd_forceIpv6 => GetText("cmd_forceIpv6");
+    public static string cmd_http10 => GetText("cmd_http10");
+    public static string cmd_http11 => GetText("cmd_http11");
+    public static string cmd_http2 => GetText("cmd_http2");
+    public static string cmd_http2PriorKnowledge => GetText("cmd_http2PriorKnowledge");
     public static string cmd_customProxy => GetText("cmd_customProxy");
     public static string cmd_customRange => GetText("cmd_customRange");
     public static string cmd_liveKeepSegments => GetText("cmd_liveKeepSegments");

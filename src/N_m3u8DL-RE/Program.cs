@@ -14,6 +14,7 @@ using N_m3u8DL_RE.Util;
 using N_m3u8DL_RE.DownloadManager;
 using N_m3u8DL_RE.CommandLine;
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
 using N_m3u8DL_RE.Enum;
 
@@ -24,7 +25,7 @@ internal class Program
     static async Task Main(string[] args)
     {
         // 处理NT6.0及以下System.CommandLine报错CultureNotFound问题
-        if (OperatingSystem.IsWindows()) 
+        if (OperatingSystem.IsWindows())
         {
             var osVersion = Environment.OSVersion.Version;
             if (osVersion.Major < 6 || osVersion is { Major: 6, Minor: 0 })
@@ -32,7 +33,7 @@ internal class Program
                 Environment.SetEnvironmentVariable("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1");
             }
         }
-        
+
         Console.CancelKeyPress += Console_CancelKeyPress;
         try { Console.CursorVisible = true; } catch { }
 
@@ -45,7 +46,7 @@ internal class Program
         {
             loc = list[index + 1];
         }
-        
+
         ResString.CurrentLoc = loc;
 
         CultureUtil.ChangeCurrentCultureName(loc);
@@ -56,8 +57,8 @@ internal class Program
     private static void Console_CancelKeyPress(object? sender, ConsoleCancelEventArgs e)
     {
         Logger.WarnMarkUp("Force Exit...");
-        try 
-        { 
+        try
+        {
             Console.CursorVisible = true;
             if (!OperatingSystem.IsWindows())
                 System.Diagnostics.Process.Start("tput", "cnorm");
@@ -68,7 +69,7 @@ internal class Program
     static int GetOrder(StreamSpec streamSpec)
     {
         if (streamSpec.Channels == null) return 0;
-            
+
         var str = streamSpec.Channels.Split('/')[0];
         return int.TryParse(str, out var order) ? order : 0;
     }
@@ -84,7 +85,7 @@ internal class Program
             Logger.Info(ResString.consoleRedirected);
         }
         CustomAnsiConsole.InitConsole(option.ForceAnsiConsole, option.NoAnsiColor);
-        
+
         // 检测更新
         if (!option.DisableUpdateCheck)
             _ = CheckUpdateAsync();
@@ -103,6 +104,27 @@ internal class Program
             HTTPUtil.ForceAddressFamily = AddressFamily.InterNetworkV6;
         else
             HTTPUtil.ForceAddressFamily = null;
+
+        switch (option.HttpVersion)
+        {
+            case HttpVersionType.Http10:
+                HTTPUtil.AppHttpClient.DefaultRequestVersion = HttpVersion.Version10;
+                HTTPUtil.AppHttpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+                break;
+            case HttpVersionType.Http11:
+                HTTPUtil.AppHttpClient.DefaultRequestVersion = HttpVersion.Version11;
+                HTTPUtil.AppHttpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+                break;
+            case HttpVersionType.Http2PriorKnowledge:
+                HTTPUtil.AppHttpClient.DefaultRequestVersion = HttpVersion.Version20;
+                HTTPUtil.AppHttpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+                break;
+            case HttpVersionType.Http2:
+            default:
+                HTTPUtil.AppHttpClient.DefaultRequestVersion = HttpVersion.Version20;
+                HTTPUtil.AppHttpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher;
+                break;
+        }
 
         if (option.UseSystemProxy == false)
         {
@@ -479,7 +501,7 @@ internal class Program
         using var content = response.Content;
         // ... Read the response to see if we have the redirected url
         if (response.StatusCode != HttpStatusCode.Found) return redirectedUrl;
-        
+
         var headers = response.Headers;
         if (headers.Location != null)
         {

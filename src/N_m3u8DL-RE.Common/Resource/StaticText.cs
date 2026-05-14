@@ -442,6 +442,30 @@ internal static class StaticText
             zhTW: "僅使用 IPv6 進行連線",
             enUS: "Use IPv6 only for connections"
         ),
+        ["cmd_http10"] = new TextContainer
+        (
+            zhCN: "强制使用 HTTP/1.0",
+            zhTW: "強制使用 HTTP/1.0",
+            enUS: "Use HTTP/1.0"
+        ),
+        ["cmd_http11"] = new TextContainer
+        (
+            zhCN: "强制使用 HTTP/1.1",
+            zhTW: "強制使用 HTTP/1.1",
+            enUS: "Use HTTP/1.1"
+        ),
+        ["cmd_http2"] = new TextContainer
+        (
+            zhCN: "使用 HTTP/2（HTTPS 通过 ALPN 协商）；未指定其它 --http* 时默认生效",
+            zhTW: "使用 HTTP/2（HTTPS 透過 ALPN 協商）；未指定其它 --http* 時預設生效",
+            enUS: "Use HTTP/2 (ALPN on HTTPS); default when no other --http* flag is used"
+        ),
+        ["cmd_http2PriorKnowledge"] = new TextContainer
+        (
+            zhCN: "强制使用 HTTP/2；明文 HTTP 使用 H2C",
+            zhTW: "強制使用 HTTP/2；明文 HTTP 使用 H2C",
+            enUS: "Use HTTP/2 with prior knowledge; cleartext HTTP uses H2C"
+        ),
         ["cmd_livePerformAsVod"] = new TextContainer
         (
             zhCN: "以点播方式下载直播流",

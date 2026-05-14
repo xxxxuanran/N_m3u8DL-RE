@@ -177,6 +177,10 @@ internal class MyOption
     /// </summary>
     public bool ForceIpv6 { get; set; }
     /// <summary>
+    /// See: <see cref="CommandInvoker.Http10"/>, <see cref="CommandInvoker.Http11"/>, <see cref="CommandInvoker.Http2"/>, <see cref="CommandInvoker.Http2PriorKnowledge"/>.
+    /// </summary>
+    public HttpVersionType HttpVersion { get; set; } = HttpVersionType.Http2;
+    /// <summary>
     /// See: <see cref="CommandInvoker.SubtitleFormat"/>.
     /// </summary>
     public SubtitleFormat SubtitleFormat { get; set; }
