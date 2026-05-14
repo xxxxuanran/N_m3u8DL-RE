@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Common.Entity;
+namespace N_m3u8DL_RE.Common.Entity;
 
 public class Playlist
 {
@@ -15,6 +15,8 @@ public class Playlist
     public double? TargetDuration { get; set; }
     // INIT信息
     public MediaSegment? MediaInit { get; set; }
+    // 直播刷新时INIT是否发生变化
+    public bool MediaInitChanged { get; set; } = false;
     // 分片信息
     public List<MediaPart> MediaParts { get; set; } = [];
 }

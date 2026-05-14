@@ -460,6 +460,15 @@ internal class HLSExtractor : IExtractor
         throw new Exception(ResString.keyProcessorNotFound);
     }
 
+    private static bool IsMediaInitChanged(MediaSegment oldInit, MediaSegment? newInit)
+    {
+        if (newInit == null) return false;
+
+        return !string.Equals(oldInit.Url, newInit.Url, StringComparison.OrdinalIgnoreCase)
+               || oldInit.StartRange != newInit.StartRange
+               || oldInit.ExpectLength != newInit.ExpectLength;
+    }
+
     public async Task<List<StreamSpec>> ExtractStreamsAsync(string rawText)
     {
         this.M3u8Content = rawText;
@@ -550,9 +559,14 @@ internal class HLSExtractor : IExtractor
 
             var newPlaylist = await ParseListAsync();
             if (lists[i].Playlist?.MediaInit != null)
+            {
+                lists[i].Playlist!.MediaInitChanged = IsMediaInitChanged(lists[i].Playlist!.MediaInit!, newPlaylist.MediaInit);
                 lists[i].Playlist!.MediaParts = newPlaylist.MediaParts; // 不更新init
+            }
             else
+            {
                 lists[i].Playlist = newPlaylist;
+            }
 
             if (lists[i].MediaType == MediaType.SUBTITLES)
             {

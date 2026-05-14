@@ -668,6 +668,9 @@ internal class SimpleLiveRecordManager2
                 if (RecordLimitReachedDic[task.Id])
                     return;
 
+                if (STOP_FLAG)
+                    return;
+
                 var allHasDatetime = streamSpec.Playlist!.MediaParts[0].MediaSegments.All(s => s.DateTime != null);
                 if (!SamePathDic.ContainsKey(task.Id))
                 {
@@ -677,6 +680,9 @@ internal class SimpleLiveRecordManager2
                 }
                 // 过滤不需要下载的片段
                 FilterMediaSegments(streamSpec, task, allHasDatetime, SamePathDic[task.Id]);
+                if (STOP_FLAG)
+                    return;
+
                 var newList = streamSpec.Playlist!.MediaParts[0].MediaSegments;
                 if (newList.Count > 0)
                 {
@@ -705,6 +711,14 @@ internal class SimpleLiveRecordManager2
                     CancellationTokenSource.Cancel();
                 }
             });
+
+            if (STOP_FLAG)
+            {
+                foreach (var target in BlockDic.Values)
+                {
+                    target.Complete();
+                }
+            }
 
             try
             {
@@ -773,6 +787,14 @@ internal class SimpleLiveRecordManager2
             // lastName 在新 playlist 中找不到 -> 尝试按可预测命名规律补齐中间缺失的 segment
             // 典型场景：B 站直播这类 fmp4 流，文件名为连续递增的数字（与 EXT-X-MEDIA-SEQUENCE 一致），
             // 当刷新间隔过长时新 playlist 起点已经跳到上次最后下载片段之后多个位置。
+            if (streamSpec.Playlist!.MediaInitChanged)
+            {
+                Logger.WarnMarkUp("[darkorange3_1]Detected EXT-X-MAP change while filling missing segments, the live stream may have restarted. Will stop recording soon.[/]");
+                STOP_FLAG = true;
+                CancellationTokenSource.Cancel();
+                return;
+            }
+
             TryFillMissingSegments(streamSpec, task);
         }
     }
