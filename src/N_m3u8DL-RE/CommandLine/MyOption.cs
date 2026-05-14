@@ -169,6 +169,14 @@ internal class MyOption
     /// </summary>
     public bool UseSystemProxy { get; set; }
     /// <summary>
+    /// See: <see cref="CommandInvoker.ForceIpv4"/>.
+    /// </summary>
+    public bool ForceIpv4 { get; set; }
+    /// <summary>
+    /// See: <see cref="CommandInvoker.ForceIpv6"/>.
+    /// </summary>
+    public bool ForceIpv6 { get; set; }
+    /// <summary>
     /// See: <see cref="CommandInvoker.SubtitleFormat"/>.
     /// </summary>
     public SubtitleFormat SubtitleFormat { get; set; }

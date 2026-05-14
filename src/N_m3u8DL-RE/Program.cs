@@ -14,6 +14,7 @@ using N_m3u8DL_RE.Util;
 using N_m3u8DL_RE.DownloadManager;
 using N_m3u8DL_RE.CommandLine;
 using System.Net;
+using System.Net.Sockets;
 using N_m3u8DL_RE.Enum;
 
 namespace N_m3u8DL_RE;
@@ -94,15 +95,24 @@ internal class Program
         Logger.LogLevel = option.LogLevel;
         Logger.Info(CommandInvoker.VERSION_INFO);
 
+        if (option is { ForceIpv4: true, ForceIpv6: true })
+            throw new ArgumentException("--ipv4 and --ipv6 cannot be used together");
+        if (option.ForceIpv4)
+            HTTPUtil.ForceAddressFamily = AddressFamily.InterNetwork;
+        else if (option.ForceIpv6)
+            HTTPUtil.ForceAddressFamily = AddressFamily.InterNetworkV6;
+        else
+            HTTPUtil.ForceAddressFamily = null;
+
         if (option.UseSystemProxy == false)
         {
-            HTTPUtil.HttpClientHandler.UseProxy = false;
+            HTTPUtil.HttpHandler.UseProxy = false;
         }
 
         if (option.CustomProxy != null)
         {
-            HTTPUtil.HttpClientHandler.Proxy = option.CustomProxy;
-            HTTPUtil.HttpClientHandler.UseProxy = true;
+            HTTPUtil.HttpHandler.Proxy = option.CustomProxy;
+            HTTPUtil.HttpHandler.UseProxy = true;
         }
 
         // 检查互斥的选项

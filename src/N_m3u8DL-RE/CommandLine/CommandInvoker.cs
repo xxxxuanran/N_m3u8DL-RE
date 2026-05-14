@@ -77,6 +77,8 @@ internal static partial class CommandInvoker
     // 代理选项
     private static readonly Option<bool> UseSystemProxy = new Option<bool>("--use-system-proxy") { Description = ResString.cmd_useSystemProxy }.WithDefault(true);
     private static readonly Option<WebProxy?> CustomProxy = new("--custom-proxy") { HelpName = "URL", Description = ResString.cmd_customProxy, CustomParser = ParseProxy};
+    private static readonly Option<bool> ForceIpv4 = new Option<bool>("-4", "--ipv4") { Description = ResString.cmd_forceIpv4 }.WithDefault(false);
+    private static readonly Option<bool> ForceIpv6 = new Option<bool>("-6", "--ipv6") { Description = ResString.cmd_forceIpv6 }.WithDefault(false);
 
     // 只下载部分分片
     private static readonly Option<CustomRange?> CustomRange = new("--custom-range") { HelpName = "RANGE", Description = ResString.cmd_customRange, CustomParser = ParseCustomRange };
@@ -673,6 +675,8 @@ internal static partial class CommandInvoker
             LiveFixVttByAudio = result.GetValue(LiveFixVttByAudio),
             UseSystemProxy = result.GetValue(UseSystemProxy),
             CustomProxy = result.GetValue(CustomProxy),
+            ForceIpv4 = result.GetValue(ForceIpv4),
+            ForceIpv6 = result.GetValue(ForceIpv6),
             CustomRange = result.GetValue(CustomRange),
             LiveWaitTime = result.GetValue(LiveWaitTime),
             LiveTakeCount = result.GetValue(LiveTakeCount),
@@ -747,7 +751,7 @@ internal static partial class CommandInvoker
             LogLevel, UILanguage, UrlProcessorArgs, Keys, KeyTextFile, DecryptionEngine, DecryptionBinaryPath, UseShakaPackager, MP4RealTimeDecryption,
             MaxSpeed,
             MuxAfterDone,
-            CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, CustomRange, TaskStartAt,
+            CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, ForceIpv4, ForceIpv6, CustomRange, TaskStartAt,
             LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveFillSegmentsGap, LiveFillSegmentsGapMax,
             MuxImports, VideoFilter, AudioFilter, SubtitleFilter, DropVideoFilter, DropAudioFilter, DropSubtitleFilter, AdKeywords, DisableUpdateCheck, AllowHlsMultiExtMap, MoreHelp
         };

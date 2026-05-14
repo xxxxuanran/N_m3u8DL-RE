@@ -1,5 +1,6 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Common.Resource;
@@ -8,20 +9,78 @@ namespace N_m3u8DL_RE.Common.Util;
 
 public static class HTTPUtil
 {
-    public static readonly HttpClientHandler HttpClientHandler = new()
-    {
-        AllowAutoRedirect = false,
-        AutomaticDecompression = DecompressionMethods.All,
-        ServerCertificateCustomValidationCallback = (sender, cert, chain, sslPolicyErrors) => true,
-        MaxConnectionsPerServer = 1024,
-    };
+    /// <summary>
+    /// When set, outbound TCP connections use only addresses in this family after DNS resolution.
+    /// </summary>
+    public static AddressFamily? ForceAddressFamily { get; set; }
 
-    public static readonly HttpClient AppHttpClient = new(HttpClientHandler)
+    public static readonly SocketsHttpHandler HttpHandler = CreateHttpHandler();
+
+    public static readonly HttpClient AppHttpClient = new(HttpHandler)
     {
         Timeout = TimeSpan.FromSeconds(100),
         DefaultRequestVersion = HttpVersion.Version20,
         DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher,
     };
+
+    private static SocketsHttpHandler CreateHttpHandler()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            AutomaticDecompression = DecompressionMethods.All,
+            MaxConnectionsPerServer = 1024,
+            ConnectCallback = ConnectAsync,
+        };
+        handler.SslOptions.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
+        return handler;
+    }
+
+    private static async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancellationToken)
+    {
+        var dnsEndPoint = context.DnsEndPoint;
+        var host = dnsEndPoint.Host;
+        var port = dnsEndPoint.Port;
+
+        if (ForceAddressFamily is null)
+        {
+            var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        }
+
+        var addresses = await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
+        var family = ForceAddressFamily.Value;
+        var filtered = addresses.Where(a => a.AddressFamily == family).ToArray();
+        if (filtered.Length == 0)
+            throw new SocketException((int)SocketError.HostNotFound);
+
+        Exception? last = null;
+        foreach (var address in filtered)
+        {
+            var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(address, port), cancellationToken).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch (Exception ex)
+            {
+                last = ex;
+                socket.Dispose();
+            }
+        }
+
+        throw last ?? new InvalidOperationException("Connect failed");
+    }
 
     private static async Task<HttpResponseMessage> DoGetAsync(string url, Dictionary<string, string>? headers = null)
     {

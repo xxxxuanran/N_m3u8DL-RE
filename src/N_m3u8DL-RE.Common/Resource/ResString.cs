@@ -83,6 +83,8 @@ public static class ResString
     public static string cmd_decryptionEngine => GetText("cmd_decryptionEngine");
     public static string cmd_concurrentDownload => GetText("cmd_concurrentDownload");
     public static string cmd_useSystemProxy => GetText("cmd_useSystemProxy");
+    public static string cmd_forceIpv4 => GetText("cmd_forceIpv4");
+    public static string cmd_forceIpv6 => GetText("cmd_forceIpv6");
     public static string cmd_customProxy => GetText("cmd_customProxy");
     public static string cmd_customRange => GetText("cmd_customRange");
     public static string cmd_liveKeepSegments => GetText("cmd_liveKeepSegments");

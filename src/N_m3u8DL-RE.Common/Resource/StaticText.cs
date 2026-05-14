@@ -430,6 +430,18 @@ internal static class StaticText
             zhTW: "使用系統默認代理",
             enUS: "Use system default proxy"
         ),
+        ["cmd_forceIpv4"] = new TextContainer
+        (
+            zhCN: "仅使用 IPv4 进行连接",
+            zhTW: "僅使用 IPv4 進行連線",
+            enUS: "Use IPv4 only for connections"
+        ),
+        ["cmd_forceIpv6"] = new TextContainer
+        (
+            zhCN: "仅使用 IPv6 进行连接",
+            zhTW: "僅使用 IPv6 進行連線",
+            enUS: "Use IPv6 only for connections"
+        ),
         ["cmd_livePerformAsVod"] = new TextContainer
         (
             zhCN: "以点播方式下载直播流",
