@@ -212,7 +212,7 @@ internal class HLSExtractor : IExtractor
         {
             Logger.WarnMarkUp($"[darkorange3_1]{ResString.allowHlsMultiExtMap}[/]");
         }
-        
+
         using StringReader sr = new StringReader(M3u8Content);
         string? line;
         bool expectSegment = false;
@@ -228,7 +228,7 @@ internal class HLSExtractor : IExtractor
         EncryptInfo currentEncryptInfo = new();
         if (ParserConfig.CustomMethod != null)
             currentEncryptInfo.Method = ParserConfig.CustomMethod.Value;
-        if (ParserConfig.CustomeKey is { Length: > 0 }) 
+        if (ParserConfig.CustomeKey is { Length: > 0 })
             currentEncryptInfo.Key = ParserConfig.CustomeKey;
         if (ParserConfig.CustomeIV is { Length: > 0 })
             currentEncryptInfo.IV = ParserConfig.CustomeIV;
@@ -302,7 +302,7 @@ internal class HLSExtractor : IExtractor
                 }
                 // 常规情况的#EXT-X-DISCONTINUITY标记，新建part
                 if (hasAd || segments.Count < 1) continue;
-                
+
                 mediaParts.Add(new MediaPart
                 {
                     MediaSegments = segments,
@@ -355,7 +355,7 @@ internal class HLSExtractor : IExtractor
             // #EXT-X-MAP
             else if (line.StartsWith(HLSTags.ext_x_map))
             {
-                if (playlist.MediaInit == null || hasAd) 
+                if (playlist.MediaInit == null || hasAd)
                 {
                     playlist.MediaInit = new MediaSegment()
                     {
@@ -534,7 +534,7 @@ internal class HLSExtractor : IExtractor
         {
             var match = newStreams.Where(n => n.ToShortString() == l.ToShortString()).ToList();
             if (match.Count == 0) continue;
-            
+
             Logger.DebugMarkUp($"{l.Url} => {match.First().Url}");
             l.Url = match.First().Url;
         }

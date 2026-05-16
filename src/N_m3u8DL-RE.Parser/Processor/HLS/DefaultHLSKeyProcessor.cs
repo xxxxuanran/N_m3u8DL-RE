@@ -30,7 +30,7 @@ public class DefaultHLSKeyProcessor : KeyProcessor
             encryptInfo.IV = HexUtil.HexToBytes(iv);
         }
         // 自定义IV
-        if (parserConfig.CustomeIV is { Length: > 0 }) 
+        if (parserConfig.CustomeIV is { Length: > 0 })
         {
             encryptInfo.IV = parserConfig.CustomeIV;
         }
@@ -60,6 +60,10 @@ public class DefaultHLSKeyProcessor : KeyProcessor
                 {
                     encryptInfo.Key = File.ReadAllBytes(uri);
                 }
+                else if (IsKnownExternalKeyUri(uri))
+                {
+                    Logger.Debug("Known external DRM key URI detected, skip loading: {}", uri);
+                }
                 else
                 {
                     var retryCount = parserConfig.KeyRetryCount;
@@ -87,7 +91,7 @@ public class DefaultHLSKeyProcessor : KeyProcessor
         }
 
         if (parserConfig.CustomMethod == null) return encryptInfo;
-        
+
         // 处理自定义加密方式
         encryptInfo.Method = parserConfig.CustomMethod.Value;
         Logger.Warn("METHOD changed from {} to {}", method ?? "", encryptInfo.Method);
@@ -109,5 +113,12 @@ public class DefaultHLSKeyProcessor : KeyProcessor
         }
 
         return url;
+    }
+
+    private static bool IsKnownExternalKeyUri(string uri)
+    {
+        return uri.StartsWith("bili://", StringComparison.OrdinalIgnoreCase)
+            || uri.StartsWith("uri:skd://", StringComparison.OrdinalIgnoreCase)
+            || uri.StartsWith("skd://", StringComparison.OrdinalIgnoreCase);
     }
 }
