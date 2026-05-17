@@ -557,7 +557,7 @@ internal class SimpleLiveRecordManager2
                 if (fileOutputStream == null)
                 {
                     // 检测目标文件是否存在，使用智能重命名
-                    var finalOutput = OtherUtil.HandleFileCollision(output, streamSpec);
+                    var finalOutput = OtherUtil.HandlePathCollision(output, streamSpec);
                     if (finalOutput != output)
                     {
                         Logger.WarnMarkUp($"{Path.GetFileName(output)} => {Path.GetFileName(finalOutput)}");

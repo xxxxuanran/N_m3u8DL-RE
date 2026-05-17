@@ -324,7 +324,7 @@ internal class SimpleDownloadManager
         var output = Path.Combine(saveDir, saveName + outputExt);
 
         // 检测目标文件是否存在，使用智能重命名
-        var finalOutput = OtherUtil.HandleFileCollision(output, streamSpec);
+        var finalOutput = OtherUtil.HandlePathCollision(output, streamSpec);
         if (finalOutput != output)
         {
             Logger.WarnMarkUp($"{Path.GetFileName(output)} => {Path.GetFileName(finalOutput)}");
@@ -563,7 +563,7 @@ internal class SimpleDownloadManager
                 var ext = streamSpec.MediaType == MediaType.AUDIO ? "m4a" : "mp4";
                 var ffOut = Path.Combine(Path.GetDirectoryName(output)!, Path.GetFileNameWithoutExtension(output) + $".{ext}");
                 // 检测目标文件是否存在，使用智能重命名
-                var finalFfOut = OtherUtil.HandleFileCollision(ffOut, streamSpec);
+                var finalFfOut = OtherUtil.HandlePathCollision(ffOut, streamSpec);
                 if (finalFfOut != ffOut)
                 {
                     Logger.WarnMarkUp($"{Path.GetFileName(ffOut)} => {Path.GetFileName(finalFfOut)}");

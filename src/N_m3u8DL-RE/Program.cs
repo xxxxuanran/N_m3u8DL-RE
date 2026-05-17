@@ -283,6 +283,16 @@ internal class Program
 
         // 生成文件夹
         var tmpDir = Path.Combine(option.TmpDir ?? Environment.CurrentDirectory, $"{option.SaveName ?? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss")}");
+        // 确保 tmpDir 是空目录；若已存在残留内容（例如上次运行未清理），追加时间戳避免覆盖
+        var originalTmpDir = tmpDir;
+        tmpDir = OtherUtil.HandlePathCollision(tmpDir);
+        if (tmpDir != originalTmpDir)
+        {
+            // 同步更新 SaveName，使最终输出文件名后缀与 tmpDir 保持一致，
+            // 避免出现 tmpDir 带时间戳后缀而输出文件被回退为 .copy 后缀的不一致情况
+            option.SaveName = Path.GetFileName(tmpDir);
+            Logger.WarnMarkUp($"[darkorange3_1]Tmp dir already exists and is not empty. Using [grey]{Path.GetFileName(tmpDir).EscapeMarkup()}[/] instead.[/]");
+        }
         // 记录文件
         if (option.WriteMetaJson)
         {
@@ -437,6 +447,15 @@ internal class Program
 
                 sldm.PrepareRestartAfterMediaInitChange();
                 await extractor.RefreshPlayListAsync(selectedStreams);
+                // 上一场次已经在 DirPrefix 中写入了 _init.mp4 / _init_dec.mp4 等内容，
+                // 新场次必须使用空目录，否则解密阶段 File.Move 会因目标已存在而抛 IOException
+                var originalDirPrefix = downloadConfig.DirPrefix;
+                downloadConfig.DirPrefix = OtherUtil.HandlePathCollision(downloadConfig.DirPrefix);
+                if (downloadConfig.DirPrefix != originalDirPrefix)
+                {
+                    // 同步更新 SaveName，保持与新 DirPrefix 后缀一致，避免新场次的输出文件被回退为 .copy 后缀
+                    option.SaveName = Path.GetFileName(downloadConfig.DirPrefix);
+                }
                 Logger.WarnMarkUp("[darkorange3_1]Restarting live recording with the refreshed EXT-X-MAP.[/]");
             }
         }

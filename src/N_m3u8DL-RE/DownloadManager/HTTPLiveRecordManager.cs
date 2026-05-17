@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Column;
+using N_m3u8DL_RE.Column;
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Common.Resource;
@@ -17,7 +17,7 @@ namespace N_m3u8DL_RE.DownloadManager;
 internal class HTTPLiveRecordManager
 {
     private static HttpClient HttpClient = new();
-    
+
     IDownloader Downloader;
     DownloaderConfig DownloaderConfig;
     StreamExtractor StreamExtractor;

@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Enum;
+using N_m3u8DL_RE.Enum;
 using System.IO.Compression;
 using System.Text.RegularExpressions;
 
@@ -10,7 +10,7 @@ internal static partial class OtherUtil
     {
         Dictionary<string, string> dic = new();
         if (headers == null) return dic;
-        
+
         foreach (string header in headers)
         {
             var index = header.IndexOf(':');
@@ -146,7 +146,7 @@ internal static partial class OtherUtil
             File.Delete(filePath);
             File.Move(deGzipFile, filePath);
         }
-        catch 
+        catch
         {
             if (File.Exists(deGzipFile)) File.Delete(deGzipFile);
         }
@@ -204,13 +204,30 @@ internal static partial class OtherUtil
     }
 
     /// <summary>
-    /// 处理文件名冲突，使用流元数据生成唯一文件名
+    /// 处理路径冲突的统一入口，确保返回的路径不会覆盖/复用已有内容：
+    /// <list type="bullet">
+    ///   <item>目录：若目录已存在且非空，附加 _yyyy-MM-dd_HH-mm-ss 时间戳后缀
+    ///     （例如上一场直播残留的 _init.mp4 / _init_dec.mp4 会让解密阶段 File.Move 失败）</item>
+    ///   <item>文件：若文件已存在，优先使用 <paramref name="streamSpec"/> 元数据生成唯一文件名，
+    ///     都不可用时回退到 .copy 后缀</item>
+    /// </list>
     /// </summary>
-    /// <param name="originalPath">原始文件路径</param>
-    /// <param name="streamSpec">流规格（用于获取元数据）</param>
-    /// <returns>不冲突的文件路径</returns>
-    public static string HandleFileCollision(string originalPath, Common.Entity.StreamSpec streamSpec)
+    /// <param name="originalPath">原始路径（文件或目录）</param>
+    /// <param name="streamSpec">流规格，仅文件冲突时用于生成基于元数据的后缀；目录调用可省略</param>
+    /// <returns>不冲突的路径</returns>
+    public static string HandlePathCollision(string originalPath, Common.Entity.StreamSpec? streamSpec = null)
     {
+        if (string.IsNullOrEmpty(originalPath)) return originalPath;
+
+        // 目录冲突处理
+        if (Directory.Exists(originalPath))
+        {
+            if (!Directory.EnumerateFileSystemEntries(originalPath).Any())
+                return originalPath;
+            return $"{originalPath}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}";
+        }
+
+        // 文件冲突处理
         if (!File.Exists(originalPath))
             return originalPath;
 
@@ -221,51 +238,54 @@ internal static partial class OtherUtil
         // 尝试使用元数据生成唯一文件名
         var attempts = new List<string>();
 
-        // 对于视频流，尝试添加分辨率和带宽
-        if (streamSpec.MediaType == Common.Enum.MediaType.VIDEO)
+        if (streamSpec != null)
         {
-            if (!string.IsNullOrEmpty(streamSpec.Resolution))
+            // 对于视频流，尝试添加分辨率和带宽
+            if (streamSpec.MediaType == Common.Enum.MediaType.VIDEO)
             {
-                attempts.Add($"{nameWithoutExt}.{streamSpec.Resolution}{ext}");
+                if (!string.IsNullOrEmpty(streamSpec.Resolution))
+                {
+                    attempts.Add($"{nameWithoutExt}.{streamSpec.Resolution}{ext}");
+                }
+                if (streamSpec.Bandwidth.HasValue)
+                {
+                    var bandwidthMbps = streamSpec.Bandwidth.Value / 1000000.0;
+                    attempts.Add($"{nameWithoutExt}.{bandwidthMbps:F1}Mbps{ext}");
+                }
+                if (!string.IsNullOrEmpty(streamSpec.Resolution) && streamSpec.Bandwidth.HasValue)
+                {
+                    var bandwidthMbps = streamSpec.Bandwidth.Value / 1000000.0;
+                    attempts.Add($"{nameWithoutExt}.{streamSpec.Resolution}.{bandwidthMbps:F1}Mbps{ext}");
+                }
             }
-            if (streamSpec.Bandwidth.HasValue)
+            // 对于音频流，尝试添加语言、声道和带宽
+            else if (streamSpec.MediaType == Common.Enum.MediaType.AUDIO)
             {
-                var bandwidthMbps = streamSpec.Bandwidth.Value / 1000000.0;
-                attempts.Add($"{nameWithoutExt}.{bandwidthMbps:F1}Mbps{ext}");
+                if (!string.IsNullOrEmpty(streamSpec.Language))
+                {
+                    attempts.Add($"{nameWithoutExt}.{streamSpec.Language}{ext}");
+                }
+                if (!string.IsNullOrEmpty(streamSpec.Channels))
+                {
+                    attempts.Add($"{nameWithoutExt}.{streamSpec.Channels}ch{ext}");
+                }
+                if (!string.IsNullOrEmpty(streamSpec.Language) && !string.IsNullOrEmpty(streamSpec.Channels))
+                {
+                    attempts.Add($"{nameWithoutExt}.{streamSpec.Language}.{streamSpec.Channels}ch{ext}");
+                }
+                if (streamSpec.Bandwidth.HasValue)
+                {
+                    var bandwidthKbps = streamSpec.Bandwidth.Value / 1000;
+                    attempts.Add($"{nameWithoutExt}.{bandwidthKbps}kbps{ext}");
+                }
             }
-            if (!string.IsNullOrEmpty(streamSpec.Resolution) && streamSpec.Bandwidth.HasValue)
+            // 对于字幕流，尝试添加语言
+            else if (streamSpec.MediaType == Common.Enum.MediaType.SUBTITLES)
             {
-                var bandwidthMbps = streamSpec.Bandwidth.Value / 1000000.0;
-                attempts.Add($"{nameWithoutExt}.{streamSpec.Resolution}.{bandwidthMbps:F1}Mbps{ext}");
-            }
-        }
-        // 对于音频流，尝试添加语言、声道和带宽
-        else if (streamSpec.MediaType == Common.Enum.MediaType.AUDIO)
-        {
-            if (!string.IsNullOrEmpty(streamSpec.Language))
-            {
-                attempts.Add($"{nameWithoutExt}.{streamSpec.Language}{ext}");
-            }
-            if (!string.IsNullOrEmpty(streamSpec.Channels))
-            {
-                attempts.Add($"{nameWithoutExt}.{streamSpec.Channels}ch{ext}");
-            }
-            if (!string.IsNullOrEmpty(streamSpec.Language) && !string.IsNullOrEmpty(streamSpec.Channels))
-            {
-                attempts.Add($"{nameWithoutExt}.{streamSpec.Language}.{streamSpec.Channels}ch{ext}");
-            }
-            if (streamSpec.Bandwidth.HasValue)
-            {
-                var bandwidthKbps = streamSpec.Bandwidth.Value / 1000;
-                attempts.Add($"{nameWithoutExt}.{bandwidthKbps}kbps{ext}");
-            }
-        }
-        // 对于字幕流，尝试添加语言
-        else if (streamSpec.MediaType == Common.Enum.MediaType.SUBTITLES)
-        {
-            if (!string.IsNullOrEmpty(streamSpec.Language))
-            {
-                attempts.Add($"{nameWithoutExt}.{streamSpec.Language}{ext}");
+                if (!string.IsNullOrEmpty(streamSpec.Language))
+                {
+                    attempts.Add($"{nameWithoutExt}.{streamSpec.Language}{ext}");
+                }
             }
         }
 

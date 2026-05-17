@@ -456,9 +456,9 @@ internal static class StaticText
         ),
         ["cmd_http2"] = new TextContainer
         (
-            zhCN: "使用 HTTP/2（HTTPS 通过 ALPN 协商）；未指定其它 --http* 时默认生效",
-            zhTW: "使用 HTTP/2（HTTPS 透過 ALPN 協商）；未指定其它 --http* 時預設生效",
-            enUS: "Use HTTP/2 (ALPN on HTTPS); default when no other --http* flag is used"
+            zhCN: "使用 HTTP/2（HTTPS 通过 ALPN 协商）",
+            zhTW: "使用 HTTP/2（HTTPS 透過 ALPN 協商）",
+            enUS: "Use HTTP/2 (ALPN on HTTPS)"
         ),
         ["cmd_http2PriorKnowledge"] = new TextContainer
         (
