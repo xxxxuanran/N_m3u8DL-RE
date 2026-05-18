@@ -297,7 +297,7 @@ internal class MyOption
     /// <summary>
     /// See: <see cref="CommandInvoker.LiveFillSegmentsGapMax"/>.
     /// </summary>
-    public long LiveFillSegmentsGapMax { get; set; } = 100L;
+    public long? LiveFillSegmentsGapMax { get; set; }
     /// <summary>
     /// See: <see cref="CommandInvoker.LiveRestartOnExtMapChange"/>.
     /// </summary>

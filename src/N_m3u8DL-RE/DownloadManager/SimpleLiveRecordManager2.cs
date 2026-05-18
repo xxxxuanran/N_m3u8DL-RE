@@ -877,7 +877,7 @@ internal class SimpleLiveRecordManager2
         }
 
         var missingCount = firstNewIndex - oldMax - 1;
-        var maxFill = DownloaderConfig.MyOptions.LiveFillSegmentsGapMax;
+        var maxFill = DownloaderConfig.MyOptions.LiveFillSegmentsGapMax!.Value;
         if (missingCount > maxFill)
         {
             Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segments which exceeds max fill limit ({maxFill}). Skipping fill.[/]");
@@ -973,6 +973,7 @@ internal class SimpleLiveRecordManager2
                 WAIT_SEC = DownloaderConfig.MyOptions.LiveWaitTime.Value;
             if (WAIT_SEC <= 0) WAIT_SEC = 1;
             Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds");
+            DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= Math.Max(1L, 60L / WAIT_SEC);
         }
         // 如果没有选中音频 取消通过音频修复vtt时间轴
         if (SelectedSteams.All(x => x.MediaType != MediaType.AUDIO))
