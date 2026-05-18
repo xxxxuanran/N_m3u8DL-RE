@@ -1,0 +1,19 @@
+<Project>
+
+  <Target Name="GenerateBuildInfo" BeforeTargets="BeforeCompile">
+    <PropertyGroup>
+      <_BuildInfoScript>$(MSBuildThisFileDirectory)..\..\scripts\Generate-BuildInfo.ps1</_BuildInfoScript>
+      <_BuildInfoScriptSh>$(MSBuildThisFileDirectory)..\..\scripts\Generate-BuildInfo.sh</_BuildInfoScriptSh>
+      <_BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_BuildInfoFile>
+    </PropertyGroup>
+
+    <Exec Condition="'$(OS)' == 'Windows_NT'" Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(_BuildInfoScript)&quot; -OutputFile &quot;$(_BuildInfoFile)&quot; -ReleaseTag &quot;$(ReleaseTag)&quot; -VersionInfoSuffix &quot;$(VersionInfoSuffix)&quot;" />
+    <Exec Condition="'$(OS)' != 'Windows_NT'" Command="sh &quot;$(_BuildInfoScriptSh)&quot; -OutputFile &quot;$(_BuildInfoFile)&quot; -ReleaseTag &quot;$(ReleaseTag)&quot; -VersionInfoSuffix &quot;$(VersionInfoSuffix)&quot;" />
+
+    <ItemGroup>
+      <Compile Include="$(_BuildInfoFile)" />
+      <FileWrites Include="$(_BuildInfoFile)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

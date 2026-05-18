@@ -2,11 +2,31 @@
 
 [See English version here](README.en.md)
 
-跨平台的DASH/HLS/MSS下载工具。支持点播、直播(DASH/HLS)。
+跨平台的 DASH/HLS/MSS 下载工具。支持点播、直播 (DASH/HLS)。
 
-[![img](https://img.shields.io/github/stars/nilaoda/N_m3u8DL-RE?label=%E7%82%B9%E8%B5%9E)](https://github.com/nilaoda/N_m3u8DL-RE)  [![img](https://img.shields.io/github/last-commit/nilaoda/N_m3u8DL-RE?label=%E6%9C%80%E8%BF%91%E6%8F%90%E4%BA%A4)](https://github.com/nilaoda/N_m3u8DL-RE)  [![img](https://img.shields.io/github/release/nilaoda/N_m3u8DL-RE?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/nilaoda/N_m3u8DL-RE/releases)  [![img](https://img.shields.io/github/license/nilaoda/N_m3u8DL-RE?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](https://github.com/nilaoda/N_m3u8DL-RE)   [![img](https://img.shields.io/github/downloads/nilaoda/N_m3u8DL-RE/total?label=%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://github.com/nilaoda/N_m3u8DL-RE/releases)
+> 本仓库为 [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 的 Fork，在 upstream 基础上包含额外功能与修复。预编译二进制由本仓库 CI 在推送 `v*` 标签时自动构建并发布。
 
-遇到 BUG 请首先确认软件是否为最新版本（如果是 Release 版本，建议到 [Actions](https://github.com/nilaoda/N_m3u8DL-RE/actions) 页面下载最新自动构建版本后查看问题是否已经被修复），如果确认版本最新且问题依旧存在，可以到 [Issues](https://github.com/nilaoda/N_m3u8DL-RE/issues) 中查找是否有人遇到过相关问题，没有的话再进行询问。
+[![stars](https://img.shields.io/github/stars/xxxxuanran/N_m3u8DL-RE?label=Stars)](https://github.com/xxxxuanran/N_m3u8DL-RE) [![release](https://img.shields.io/github/v/release/xxxxuanran/N_m3u8DL-RE?label=Release)](https://github.com/xxxxuanran/N_m3u8DL-RE/releases) [![license](https://img.shields.io/github/license/xxxxuanran/N_m3u8DL-RE?label=License)](https://github.com/xxxxuanran/N_m3u8DL-RE) [![downloads](https://img.shields.io/github/downloads/xxxxuanran/N_m3u8DL-RE/total?label=Downloads)](https://github.com/xxxxuanran/N_m3u8DL-RE/releases)
+
+遇到 BUG 请先确认是否使用 [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases) 中的最新版本；若问题仍存在，请到本仓库 [Issues](https://github.com/xxxxuanran/N_m3u8DL-RE/issues) 反馈（上游相关问题也可参考 [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE/issues)）。
+
+---
+
+## 下载
+
+从 [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases) 页面下载与系统匹配的压缩包。推送形如 `v0.6.0` 的 Git 标签后，GitHub Actions 会自动构建并发布各平台产物。
+
+| 平台 | 文件名示例 |
+|------|------------|
+| Windows x64 | `N_m3u8DL-RE_v0.6.0_win-x64_*.zip` |
+| Windows arm64 | `N_m3u8DL-RE_v0.6.0_win-arm64_*.zip` |
+| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.0_win-NT6.0-x86_*.zip` |
+| Linux x64 (musl 静态) | `N_m3u8DL-RE_v0.6.0_linux-x64_*.tar.gz` |
+| Linux arm64 (musl 静态) | `N_m3u8DL-RE_v0.6.0_linux-arm64_*.tar.gz` |
+| macOS x64 | `N_m3u8DL-RE_v0.6.0_osx-x64_*.tar.gz` |
+| macOS arm64 | `N_m3u8DL-RE_v0.6.0_osx-arm64_*.tar.gz` |
+
+Linux 产物为 musl 完全静态链接，可在多数发行版上直接运行。正式 Release 构建启动时版本示例：`N_m3u8DL-RE (Beta version) 20260518+v0.6.0`；在非 tag 提交上本地编译时可能显示 `yyyyMMdd+<commit>`。
 
 ---
 
@@ -26,9 +46,37 @@ yay -Syu n-m3u8dl-re-git
 
 ## 命令行参数
 
+### 相对上游的 Fork 特色功能
+
+本 Fork 在 [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 基础上增加了以下能力（上游 `--help` 中通常没有对应选项）：
+
+#### 直播录制增强
+
+| 参数 | 说明 |
+|------|------|
+| `--live-host-mirror <HOST>` | 为直播分片配置镜像 Host，主 URL 与各镜像**并发拉取**，采用最先成功的结果。可重复指定；支持 `hostname`、`host:port` 或完整 `http(s)://` URL。 |
+| `--live-fill-segments-gap` | 刷新播放列表出现序号间隙时，按连续数字规律**自动补齐**缺失分片（默认开启）。 |
+| `--live-fill-segments-gap-max <NUM>` | 单次自动补齐允许填补的最大分片数量。未指定时默认为 `max(1, 60 ÷ 刷新间隔秒数)`，其中刷新间隔取自 M3U8 播放列表（约为该次列表内分片总时长的一半再提前 2 秒），也可由 `--live-wait-time` 覆盖。 |
+| `--live-restart-on-ext-map-change` | 检测到 `EXT-X-MAP`（初始化分片）变化时，**收尾当前文件并以新 init 分片继续录制**（默认开启）。设为 `false` 时改为直接停止录制（与上游旧行为接近）。 |
+
+#### 输出与网络
+
+| 参数 | 说明 |
+|------|------|
+| `--save-pattern` 的 `<DateTime>` | 命名模板支持 `<DateTime>`（默认 `yyyy-MM-dd_HH-mm-ss`）及 `<DateTime:格式>`（.NET 日期格式），便于长跑直播按时间分段命名。示例：`--save-pattern "<SaveName>_<DateTime:yyyyMMdd>_<Resolution>"` |
+| `--log-file-only` | 日志**仅写入文件**，不在终端输出，适合后台长时间录制。 |
+| `-4` / `--ipv4`、`-6` / `--ipv6` | 强制连接仅走 IPv4 或 IPv6。 |
+| `--http1.0`、`--http1.1`、`--http2`、`--http2-prior-knowledge` | 显式选择 HTTP 协议版本；默认 HTTPS 通过 ALPN 协商 HTTP/2。 |
+
+#### 其他改进
+
+- 支持 **bilibili** 相关 DRM 密钥类型（`bilidrm`）。
+- 修复相同参数重复启动时**临时目录冲突**的问题。
+- Release 构建提供 **Linux musl 完全静态**二进制（见上方「下载」表格）。
+
 ```
 Description:
-  N_m3u8DL-RE (Beta version) 20251027
+  N_m3u8DL-RE (Beta version) 20260518+v0.6.0
 
 Usage:
   N_m3u8DL-RE <input> [options]
@@ -40,14 +88,15 @@ Options:
   --tmp-dir <tmp-dir>                                     设置临时文件存储目录
   --save-dir <save-dir>                                   设置输出目录
   --save-name <save-name>                                 设置保存文件名
-  --save-pattern <save-pattern>                           设置保存文件命名模板, 支持使用变量: 
-                                                          <SaveName>, <Id>, <Codecs>, <Language>, <Resolution>, 
-                                                          <Bandwidth>, <MediaType>, <Channels>, <FrameRate>, 
-                                                          <VideoRange>, <GroupId>, <Ext>
-                                                          示例: --save-pattern "<SaveName>_<Resolution>_<Bandwidth>"
+  --save-pattern <save-pattern>                           设置保存文件命名模板, 支持使用变量:
+                                                          <SaveName>, <Id>, <Codecs>, <Language>, <Resolution>,
+                                                          <Bandwidth>, <MediaType>, <Channels>, <FrameRate>,
+                                                          <VideoRange>, <GroupId>, <Ext>, <DateTime>
+                                                          <DateTime> 默认为 yyyy-MM-dd_HH-mm-ss, 也可使用 <DateTime:格式> 自定义 (.NET DateTime 格式)
+                                                          示例: --save-pattern "<SaveName>_<DateTime:yyyyMMdd>_<Resolution>"
   --log-file-path <log-file-path>                         设置日志文件路径, 例如 C:\Logs\log.txt
   --base-url <base-url>                                   设置BaseURL
-  --thread-count <number>                                 设置下载线程数 [default: 本机CPU线程数]
+  --thread-count <number>                                 设置下载线程数 [default: 12]
   --download-retry-count <number>                         每个分片下载异常时的重试次数 [default: 3]
   --http-request-timeout <seconds>                        HTTP请求的超时时间(秒) [default: 100]
   --force-ansi-console                                    强制认定终端为支持ANSI且可交互的终端
@@ -58,12 +107,12 @@ Options:
   --check-segments-count                                  检测实际下载的分片数量和预期数量是否匹配 [default: True]
   --binary-merge                                          二进制合并 [default: False]
   --use-ffmpeg-concat-demuxer                             使用 ffmpeg 合并时，使用 concat 分离器而非 concat 协议 [default: False]
-  --del-after-done                                        完成后删除临时文件 [default: True]
+  --del-after-done                                        完成后删除临时文件 [default: False]
   --no-date-info                                          混流时不写入日期信息 [default: False]
   --no-log                                                关闭日志文件输出 [default: False]
   --log-file-only                                         仅将日志输出到文件，不输出到终端 [default: False]
   --write-meta-json                                       解析后的信息是否输出json文件 [default: True]
-  --append-url-params                                     将输入Url的Params添加至分片, 对某些网站很有用, 例如 kakao.com [default: False]
+  --append-url-params                                     将输入Url的Params添加至分片, 对某些网站很有用, 例如 kakao.com [default: True]
   -mt, --concurrent-download                              并发下载已选择的音频、视频和字幕 [default: False]
   -H, --header <header>                                   为HTTP请求设置特定的请求头, 例如:
                                                           -H "Cookie: mycookie" -H "User-Agent: iOS"
@@ -88,6 +137,12 @@ Options:
   --custom-hls-iv <FILE|HEX|BASE64>                       指定HLS解密IV. 可以是文件, HEX或Base64
   --use-system-proxy                                      使用系统默认代理 [default: True]
   --custom-proxy <URL>                                    设置请求代理, 如 http://127.0.0.1:8888
+  -4, --ipv4                                              仅使用 IPv4 进行连接 [default: False]
+  -6, --ipv6                                              仅使用 IPv6 进行连接 [default: False]
+  --http1.0                                               强制使用 HTTP/1.0 [default: False]
+  --http1.1                                               强制使用 HTTP/1.1 [default: False]
+  --http2                                                 使用 HTTP/2（HTTPS 通过 ALPN 协商） [default: True]
+  --http2-prior-knowledge                                 强制使用 HTTP/2；明文 HTTP 使用 H2C [default: False]
   --custom-range <RANGE>                                  仅下载部分分片. 输入 "--morehelp custom-range" 以查看详细信息
   --task-start-at <yyyyMMddHHmmss>                        在此时间之前不会开始执行任务
   --live-perform-as-vod                                   以点播方式下载直播流 [default: False]
@@ -95,9 +150,13 @@ Options:
   --live-keep-segments                                    录制直播并开启实时合并时依然保留分片 [default: True]
   --live-pipe-mux                                         录制直播并开启实时合并时通过管道+ffmpeg实时混流到TS文件 [default: False]
   --live-fix-vtt-by-audio                                 通过读取音频文件的起始时间修正VTT字幕 [default: False]
+  --live-host-mirror <HOST>                               录制直播时额外镜像 host；每个分片同时从主 URL 与各镜像拉取，采用最先成功完成的副本。可重复指定。支持 hostname、host:port 或完整 http(s) URL。
   --live-record-limit <HH:mm:ss>                          录制直播时的录制时长限制
   --live-wait-time <SEC>                                  手动设置直播列表刷新间隔
   --live-take-count <NUM>                                 手动设置录制直播时首次获取分片的数量 [default: 16]
+  --live-fill-segments-gap                                录制直播刷新播放列表出现间隙时，按可预测的连续数字命名规律自动补齐缺失的分片 [default: True]
+  --live-fill-segments-gap-max <NUM>                      录制直播自动补齐缺失分片时允许补齐的最大数量
+  --live-restart-on-ext-map-change                        录制直播时若检测到EXT-X-MAP变动，自动收尾当前输出并以新的初始化分片重启录制；关闭时将直接停止录制 [default: True]
   --mux-import <OPTIONS>                                  混流时引入外部媒体文件. 输入 "--morehelp mux-import" 以查看详细信息
   -sv, --select-video <OPTIONS>                           通过正则表达式选择符合要求的视频流. 输入 "--morehelp select-video" 以查看详细信息
   -sa, --select-audio <OPTIONS>                           通过正则表达式选择符合要求的音频流. 输入 "--morehelp select-audio" 以查看详细信息
@@ -306,4 +365,7 @@ ffmpeg -readrate 1 -i 2022-09-21_19-54-42_V.mp4 -i 2022-09-21_19-54-42_V.chi.m4a
 
 ## 赞助
 
+感谢上游作者 nilaoda 的原项目开发与维护。
+
 <a href="https://www.buymeacoffee.com/nilaoda" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+

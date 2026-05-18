@@ -1,0 +1,347 @@
+name: Release Build
+
+# 触发方式:
+#   1) 推送 v* tag: 完整发布流程 (构建 + 创建 GitHub Release)。
+#      向 main 等分支 push 提交不会运行本工作流。
+#   2) workflow_dispatch (手动): 仅构建产物用于烟雾测试,不创建 Release。
+#      可在 Actions 页面"Run workflow"触发,inputs.tag 仅用于 artifact 命名。
+on:
+  push:
+    tags:
+      - 'v*'
+    branches-ignore:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Synthetic tag used for artifact naming (does not create a Release).'
+        required: false
+        default: 'v0.0.0-dispatch'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_SDK_VERSION: "10.0.101"
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      date: ${{ steps.meta.outputs.date }}
+      version_info_suffix: ${{ steps.meta.outputs.version_info_suffix }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve tag metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG:-v0.0.0-dispatch}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          DATE=$(TZ=Asia/Shanghai date +'%Y%m%d')
+          HEAD_COMMIT=$(git rev-parse HEAD)
+          SHORT_COMMIT=$(git rev-parse --short HEAD)
+          RELEASE_DATE=$(TZ=Asia/Shanghai git log -1 --format=%cd --date=format:%Y%m%d "$HEAD_COMMIT")
+          # workflow_dispatch 时不要求 tag 真实存在,直接使用 short commit 作为后缀。
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION_INFO_SUFFIX="${RELEASE_DATE}+${SHORT_COMMIT}"
+          else
+            TAG_COMMIT=$(git rev-parse "${TAG}^{commit}")
+            if [ "$TAG_COMMIT" = "$HEAD_COMMIT" ]; then
+              VERSION_INFO_SUFFIX="${RELEASE_DATE}+${TAG}"
+            else
+              VERSION_INFO_SUFFIX="${RELEASE_DATE}+${SHORT_COMMIT}"
+            fi
+          fi
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "date=${DATE}"
+            echo "version_info_suffix=${VERSION_INFO_SUFFIX}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-win-nt6_0-x86:
+    runs-on: windows-latest
+    needs: prepare
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install zip
+        run: choco install zip --no-progress --yes
+
+      - name: Set up dotnet
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+      - run: powershell -Command "(Get-Content src/N_m3u8DL-RE/N_m3u8DL-RE.csproj) -replace '<TargetFramework>.*</TargetFramework>', '<TargetFramework>net10.0-windows</TargetFramework>' | Set-Content src/N_m3u8DL-RE/N_m3u8DL-RE.csproj"
+      - run: dotnet add src/N_m3u8DL-RE/N_m3u8DL-RE.csproj package YY-Thunks --version 1.1.4
+      - run: dotnet add src/N_m3u8DL-RE/N_m3u8DL-RE.csproj package VC-LTL --version 5.1.1
+      - run: dotnet publish src/N_m3u8DL-RE -p:TargetPlatformMinVersion=6.0 -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r win-x86 -c Release -o artifact
+
+      - name: Package [win-x86]
+        run: |
+          cd artifact
+          zip ../N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_win-NT6.0-x86_${{ needs.prepare.outputs.date }}.zip N_m3u8DL-RE.exe
+
+      - name: Upload Artifact [win-x86]
+        uses: actions/upload-artifact@v6
+        with:
+          name: win-NT6.0-x86
+          path: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_win-NT6.0-x86_${{ needs.prepare.outputs.date }}.zip
+
+  build-windows:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+            artifact: win-x64
+          - runner: windows-11-arm
+            rid: win-arm64
+            artifact: win-arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install zip
+        run: choco install zip --no-progress --yes
+
+      - name: Set up dotnet
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+      - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r ${{ matrix.rid }} -c Release -o artifact
+
+      - name: Package [${{ matrix.artifact }}]
+        run: |
+          cd artifact
+          zip ../N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_${{ matrix.artifact }}_${{ needs.prepare.outputs.date }}.zip N_m3u8DL-RE.exe
+
+      - name: Upload Artifact [${{ matrix.artifact }}]
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_${{ matrix.artifact }}_${{ needs.prepare.outputs.date }}.zip
+
+  # build-android-bionic-x64:
+  #   runs-on: windows-latest
+  #   needs: prepare
+
+  #   steps:
+  #     - uses: actions/checkout@v6
+
+  #     - name: Set up NDK
+  #       shell: pwsh
+  #       run: |
+  #         Invoke-WebRequest -Uri "https://dl.google.com/android/repository/android-ndk-r27c-windows.zip" -OutFile "android-ndk.zip"
+  #         Expand-Archive -Path "android-ndk.zip" -DestinationPath "./android-ndk"
+  #         $ndkRoot = "${{ github.workspace }}\android-ndk\android-ndk-r27c"
+  #         echo "NDK_ROOT=$ndkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+  #         $ndkBinPath = "$ndkRoot\toolchains\llvm\prebuilt\windows-x86_64\bin"
+  #         echo $ndkBinPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8
+
+  #     - name: Set up dotnet
+  #       uses: actions/setup-dotnet@v5
+  #       with:
+  #         dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+  #     - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r linux-bionic-x64 -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true -c Release -o artifact
+
+  #     - name: Package [android-bionic-x64]
+  #       run: |
+  #         cd artifact
+  #         tar -czvf ../N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_android-bionic-x64_${{ needs.prepare.outputs.date }}.tar.gz N_m3u8DL-RE
+
+  #     - name: Upload Artifact [android-bionic-x64]
+  #       uses: actions/upload-artifact@v6
+  #       with:
+  #         name: android-bionic-x64
+  #         path: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_android-bionic-x64_${{ needs.prepare.outputs.date }}.tar.gz
+
+  # build-android-bionic-arm64:
+  #   runs-on: windows-11-arm
+  #   needs: prepare
+
+  #   steps:
+  #     - uses: actions/checkout@v6
+
+  #     - name: Set up NDK
+  #       shell: pwsh
+  #       run: |
+  #         Invoke-WebRequest -Uri "https://dl.google.com/android/repository/android-ndk-r27c-windows.zip" -OutFile "android-ndk.zip"
+  #         Expand-Archive -Path "android-ndk.zip" -DestinationPath "./android-ndk"
+  #         $ndkRoot = "${{ github.workspace }}\android-ndk\android-ndk-r27c"
+  #         echo "NDK_ROOT=$ndkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+  #         $ndkBinPath = "$ndkRoot\toolchains\llvm\prebuilt\windows-arm64\bin"
+  #         echo $ndkBinPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8
+
+  #     - name: Set up dotnet
+  #       uses: actions/setup-dotnet@v5
+  #       with:
+  #         dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+  #     - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r linux-bionic-arm64 -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true -c Release -o artifact
+
+  #     - name: Package [android-bionic-arm64]
+  #       run: |
+  #         cd artifact
+  #         tar -czvf ../N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_android-bionic-arm64_${{ needs.prepare.outputs.date }}.tar.gz N_m3u8DL-RE
+
+  #     - name: Upload Artifact [android-bionic-arm64]
+  #       uses: actions/upload-artifact@v6
+  #       with:
+  #         name: android-bionic-arm64
+  #         path: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_android-bionic-arm64_${{ needs.prepare.outputs.date }}.tar.gz
+
+  # musl 静态 NativeAOT 构建: 两个架构均在对应 native runner 上, 通过手动 `docker run`
+  # 启动 Alpine 容器进行编译 (不使用 GitHub Actions 的 `container:` 字段)。
+  #
+  # 为什么用 docker run 而不是 `container:`:
+  #   GitHub Actions 不支持 ARM64 runner 配 Alpine 容器 (因为 JS-based actions 如
+  #   actions/checkout 需要在容器内跑 Node, ARM64+Alpine 组合没内置 Node 二进制,
+  #   见 https://github.com/actions/runner/issues/801)。但若把 actions/checkout
+  #   留在 host 上跑, Alpine 容器只在编译这一步用 docker 启动, 整个限制就绕过去了。
+  #
+  # 为什么用 Alpine 容器而不是 host 原生编译:
+  #   musl 纯净 rootfs 避免 host glibc 库 (如 /lib/{arch}-linux-gnu/libcrypto.a)
+  #   被 ld.bfd 误抓进 musl 静态 PIE 链接, 产物 ABI 干净一致。
+  build-linux:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            image: mcr.microsoft.com/dotnet/sdk:10.0-alpine
+            rid: linux-musl-x64
+            artifact: linux-x64
+          - runner: ubuntu-24.04-arm
+            image: mcr.microsoft.com/dotnet/sdk:10.0-alpine-arm64v8
+            rid: linux-musl-arm64
+            artifact: linux-arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build NativeAOT in Alpine container
+        # openssl-libs-static 提供 libssl.a / libcrypto.a 用于 -static-pie 链接;
+        # openssl-dev 只装 .so 动态库, 在 -static-pie 模式下 ld 会拒绝使用。
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          VERSION_INFO_SUFFIX: ${{ needs.prepare.outputs.version_info_suffix }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e VERSION \
+            -e VERSION_INFO_SUFFIX \
+            ${{ matrix.image }} \
+            sh -c '
+              set -eu
+              apk add --no-cache clang build-base cmake zlib-dev openssl-dev openssl-libs-static linux-headers llvm lld git
+              dotnet publish src/N_m3u8DL-RE \
+                -p:Version="$VERSION" \
+                -p:VersionInfoSuffix="$VERSION_INFO_SUFFIX" \
+                -r ${{ matrix.rid }} \
+                -c Release \
+                -o /workspace/artifact
+              # 把产物所有权交回 host runner user, 防止后续 host 上 tar 时遇到权限问题。
+              chown -R "$(stat -c "%u:%g" /workspace)" /workspace/artifact
+            '
+
+      - name: Package [${{ matrix.artifact }}]
+        run: |
+          cd artifact
+          tar -czvf ../N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_${{ matrix.artifact }}_${{ needs.prepare.outputs.date }}.tar.gz N_m3u8DL-RE
+
+      - name: Upload Artifact [${{ matrix.artifact }}]
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_${{ matrix.artifact }}_${{ needs.prepare.outputs.date }}.tar.gz
+
+  build-mac:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26-intel
+            rid: osx-x64
+            artifact: osx-x64
+          - runner: macos-26
+            rid: osx-arm64
+            artifact: osx-arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up dotnet
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+      - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r ${{ matrix.rid }} -c Release -o artifact
+
+      - name: Package [${{ matrix.artifact }}]
+        run: |
+          cd artifact
+          tar -czvf ../N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_${{ matrix.artifact }}_${{ needs.prepare.outputs.date }}.tar.gz N_m3u8DL-RE
+
+      - name: Upload Artifact [${{ matrix.artifact }}]
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}_${{ matrix.artifact }}_${{ needs.prepare.outputs.date }}.tar.gz
+
+  create_release:
+    # 仅在 v* tag push 时发布 Release;手动 workflow_dispatch 仅做构建烟雾测试。
+    if: github.event_name == 'push'
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs:
+      - prepare
+      - build-win-nt6_0-x86
+      - build-windows
+      - build-linux
+      - build-mac
+      # - build-android-bionic-x64
+      # - build-android-bionic-arm64
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: N_m3u8DL-RE_${{ needs.prepare.outputs.tag }}
+          files: dist/**/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}

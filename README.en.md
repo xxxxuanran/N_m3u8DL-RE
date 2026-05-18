@@ -2,9 +2,29 @@
 
 Cross-platform DASH/HLS/MSS download tool. Supports on-demand and live streaming (DASH/HLS).
 
-[![img](https://img.shields.io/github/stars/nilaoda/N_m3u8DL-RE?label=%E7%82%B9%E8%B5%9E)](https://github.com/nilaoda/N_m3u8DL-RE)  [![img](https://img.shields.io/github/last-commit/nilaoda/N_m3u8DL-RE?label=%E6%9C%80%E8%BF%91%E6%8F%90%E4%BA%A4)](https://github.com/nilaoda/N_m3u8DL-RE)  [![img](https://img.shields.io/github/release/nilaoda/N_m3u8DL-RE?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/nilaoda/N_m3u8DL-RE/releases)  [![img](https://img.shields.io/github/license/nilaoda/N_m3u8DL-RE?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](https://github.com/nilaoda/N_m3u8DL-RE)   [![img](https://img.shields.io/github/downloads/nilaoda/N_m3u8DL-RE/total?label=%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://github.com/nilaoda/N_m3u8DL-RE/releases)
+> This repository is a fork of [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) with additional features and fixes. Prebuilt binaries are produced by CI on this repo when a `v*` tag is pushed.
 
-If you encounter a bug, please first confirm whether you are using the latest version of the software. (If you are using a release version, it is recommended to go to the [Actions](https://github.com/nilaoda/N_m3u8DL-RE/actions) page to download the latest automatically built version and check if the issue has already been fixed.) If you are using the latest version and the issue still exists, you can check the [Issues](https://github.com/nilaoda/N_m3u8DL-RE/issues) section to see if someone else has encountered a similar problem. If not, feel free to open a new issue.
+[![stars](https://img.shields.io/github/stars/xxxxuanran/N_m3u8DL-RE?label=Stars)](https://github.com/xxxxuanran/N_m3u8DL-RE) [![release](https://img.shields.io/github/v/release/xxxxuanran/N_m3u8DL-RE?label=Release)](https://github.com/xxxxuanran/N_m3u8DL-RE/releases) [![license](https://img.shields.io/github/license/xxxxuanran/N_m3u8DL-RE?label=License)](https://github.com/xxxxuanran/N_m3u8DL-RE) [![downloads](https://img.shields.io/github/downloads/xxxxuanran/N_m3u8DL-RE/total?label=Downloads)](https://github.com/xxxxuanran/N_m3u8DL-RE/releases)
+
+If you encounter a bug, please confirm you are on the latest [Release](https://github.com/xxxxuanran/N_m3u8DL-RE/releases). If the issue persists, open an [Issue](https://github.com/xxxxuanran/N_m3u8DL-RE/issues) here (upstream issues: [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE/issues)).
+
+---
+
+## Download
+
+Get prebuilt packages from [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases). Pushing a tag such as `v0.6.0` triggers GitHub Actions to build and publish artifacts for all supported platforms.
+
+| Platform | Example filename |
+|----------|------------------|
+| Windows x64 | `N_m3u8DL-RE_v0.6.0_win-x64_*.zip` |
+| Windows arm64 | `N_m3u8DL-RE_v0.6.0_win-arm64_*.zip` |
+| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.0_win-NT6.0-x86_*.zip` |
+| Linux x64 (static musl) | `N_m3u8DL-RE_v0.6.0_linux-x64_*.tar.gz` |
+| Linux arm64 (static musl) | `N_m3u8DL-RE_v0.6.0_linux-arm64_*.tar.gz` |
+| macOS x64 | `N_m3u8DL-RE_v0.6.0_osx-x64_*.tar.gz` |
+| macOS arm64 | `N_m3u8DL-RE_v0.6.0_osx-arm64_*.tar.gz` |
+
+Linux builds are fully static (musl). A release build shows e.g. `N_m3u8DL-RE (Beta version) 20260518+v0.6.0`; local builds off a non-tag commit may show `yyyyMMdd+<commit>`.
 
 ---
 
@@ -24,9 +44,39 @@ yay -Syu n-m3u8dl-re-git
 
 ## Command line parameters
 
+### Fork features (vs upstream)
+
+This fork extends [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) with the following (generally not present in upstream `--help`):
+
+#### Live recording
+
+| Option | Description |
+|--------|-------------|
+| `--live-host-mirror <HOST>` | Extra mirror host(s) for live segments: fetch concurrently from the primary URL and mirrors; **first successful response wins**. Repeatable; accepts `hostname`, `host:port`, or full `http(s)://` URL. |
+| `--live-fill-segments-gap` | When the media playlist has sequence gaps, **auto-fill** missing segments by predictable numeric naming (default: on). |
+| `--live-fill-segments-gap-max <NUM>` | Max segments to fill per gap-fill pass. When omitted, defaults to `max(1, 60 ÷ refresh interval in seconds)`, where the interval is derived from the M3U8 playlist (roughly half the sum of segment durations in that refresh, minus 2s), or overridden by `--live-wait-time`. |
+| `--live-restart-on-ext-map-change` | On `EXT-X-MAP` (init segment) change, **finalize current output and restart** with the new init segment (default: on). Set to `false` to stop recording instead (closer to legacy upstream behavior). |
+
+#### Output & networking
+
+| Option | Description |
+|--------|-------------|
+| `--save-pattern` `<DateTime>` | Template variable `<DateTime>` (default format `yyyy-MM-dd_HH-mm-ss`) and `<DateTime:format>` (.NET date format) for time-based filenames in long live runs. Example: `--save-pattern "<SaveName>_<DateTime:yyyyMMdd>_<Resolution>"` |
+| `--log-file-only` | Write logs **to file only**, not to the console. |
+| `-4` / `--ipv4`, `-6` / `--ipv6` | Force IPv4-only or IPv6-only connections. |
+| `--http1.0`, `--http1.1`, `--http2`, `--http2-prior-knowledge` | Pin HTTP version; default uses HTTP/2 via ALPN on HTTPS. |
+
+#### Other improvements
+
+- **Bilibili** DRM key type (`bilidrm`) support.
+- Fix **temp directory reuse** when launching duplicate runs with the same arguments.
+- Release builds ship **fully static Linux musl** binaries (see Download table above).
+
+> From `N_m3u8DL-RE --help` on a local win-x64 Native AOT build (`artifact-x64-publish`).
+
 ```
 Description:
-  N_m3u8DL-RE (Beta version) 20241203
+  N_m3u8DL-RE (Beta version) 20260518+v0.6.0
 
 Usage:
   N_m3u8DL-RE <input> [options]
@@ -38,30 +88,32 @@ Options:
   --tmp-dir <tmp-dir>                                     Set temporary file directory
   --save-dir <save-dir>                                   Set output directory
   --save-name <save-name>                                 Set output filename
+  --save-pattern <save-pattern>                           Set output filename pattern with variables: 
+                                                          <SaveName>, <Id>, <Codecs>, <Language>, <Resolution>, 
+                                                          <Bandwidth>, <MediaType>, <Channels>, <FrameRate>, 
+                                                          <VideoRange>, <GroupId>, <Ext>, <DateTime>
+                                                          <DateTime> defaults to yyyy-MM-dd_HH-mm-ss, or use <DateTime:format> for a custom .NET DateTime format
+                                                          Example: --save-pattern "<SaveName>_<DateTime:yyyyMMdd>_<Resolution>"
+  --log-file-path <log-file-path>                         Set log file path, Example: C:\Logs\log.txt
   --base-url <base-url>                                   Set BaseURL
-  --thread-count <number>                                 Set download thread count [default: based on the number of CPU cores]
+  --thread-count <number>                                 Set download thread count [default: 12]
   --download-retry-count <number>                         The number of retries when download segment error [default: 3]
   --http-request-timeout <seconds>                        Timeout duration for HTTP requests (in seconds) [default: 100]
   --force-ansi-console                                    Force assuming the terminal is ANSI-compatible and interactive
   --no-ansi-color                                         Remove ANSI colors
-  --auto-select                                           Automatically selects the best tracks of all types [default:
-                                                          False]
+  --auto-select                                           Automatically selects the best tracks of all types [default: False]
   --skip-merge                                            Skip segments merge [default: False]
   --skip-download                                         Skip download [default: False]
-  --check-segments-count                                  Check if the actual number of segments downloaded matches the
-                                                          expected number [default: True]
+  --check-segments-count                                  Check if the actual number of segments downloaded matches the expected number [default: True]
   --binary-merge                                          Binary merge [default: False]
-  --use-ffmpeg-concat-demuxer                             When merging with ffmpeg, use the concat demuxer instead of
-                                                          the concat protocol [default: False]
-  --del-after-done                                        Delete temporary files when done [default: True]
+  --use-ffmpeg-concat-demuxer                             When merging with ffmpeg, use the concat demuxer instead of the concat protocol [default: False]
+  --del-after-done                                        Delete temporary files when done [default: False]
   --no-date-info                                          Date information is not written during muxing [default: False]
   --no-log                                                Disable log file output [default: False]
   --log-file-only                                         Write logs only to file, not to terminal [default: False]
   --write-meta-json                                       Write meta json after parsed [default: True]
-  --append-url-params                                     Add Params of input Url to segments, useful for some
-                                                          websites, such as kakao.com [default: False]
-  -mt, --concurrent-download                              Concurrently download the selected audio, video and subtitles
-                                                          [default: False]
+  --append-url-params                                     Add Params of input Url to segments, useful for some websites, such as kakao.com [default: True]
+  -mt, --concurrent-download                              Concurrently download the selected audio, video and subtitles [default: False]
   -H, --header <header>                                   Pass custom header(s) to server, Example:
                                                           -H "Cookie: mycookie" -H "User-Agent: iOS"
   --sub-only                                              Select only subtitle tracks [default: False]
@@ -71,60 +123,53 @@ Options:
   --log-level <DEBUG|ERROR|INFO|OFF|WARN>                 Set log level [default: INFO]
   --ui-language <en-US|zh-CN|zh-TW>                       Set UI language
   --urlprocessor-args <urlprocessor-args>                 Give these arguments to the URL Processors.
-  --key <key>                                             Set decryption key(s) to mp4decrypt/shaka-packager/ffmpeg.
-                                                          format:
+  --key <key>                                             Set decryption key(s) to mp4decrypt/shaka-packager/ffmpeg. format:
                                                           --key KID1:KEY1 --key KID2:KEY2
                                                           or use --key KEY if all tracks share the same key.
-  --key-text-file <key-text-file>                         Set the kid-key file, the program will search the KEY with
-                                                          KID from the file.(Very large file are not recommended)
-  --decryption-engine <FFMPEG|MP4DECRYPT|SHAKA_PACKAGER>  Set the third-party program used for decryption [default:
-                                                          MP4DECRYPT]
-  --decryption-binary-path <PATH>                         Full path to the tool used for MP4 decryption, like
-                                                          C:\Tools\mp4decrypt.exe
+  --key-text-file <key-text-file>                         Set the kid-key file, the program will search the KEY with KID from the file.(Very large file are not recommended)
+  --decryption-engine <FFMPEG|MP4DECRYPT|SHAKA_PACKAGER>  Set the third-party program used for decryption [default: MP4DECRYPT]
+  --decryption-binary-path <PATH>                         Full path to the tool used for MP4 decryption, like C:\Tools\mp4decrypt.exe
   --mp4-real-time-decryption                              Decrypt MP4 segments in real time [default: False]
   -R, --max-speed <SPEED>                                 Set speed limit, Mbps or Kbps, for example: 15M 100K.
-  -M, --mux-after-done <OPTIONS>                          When all works is done, try to mux the downloaded streams.
-                                                          Use "--morehelp mux-after-done" for more details
-  --custom-hls-method <METHOD>                            Set HLS encryption method
-                                                          (AES_128|AES_128_ECB|CENC|CHACHA20|NONE|SAMPLE_AES|SAMPLE_AES_
-                                                          CTR|UNKNOWN)
+  -M, --mux-after-done <OPTIONS>                          When all works is done, try to mux the downloaded streams. Use "--morehelp mux-after-done" for more details
+  --custom-hls-method <METHOD>                            Set HLS encryption method (AES_128|AES_128_ECB|CENC|CHACHA20|NONE|SAMPLE_AES|SAMPLE_AES_CTR|UNKNOWN)
   --custom-hls-key <FILE|HEX|BASE64>                      Set the HLS decryption key. Can be file, HEX or Base64
   --custom-hls-iv <FILE|HEX|BASE64>                       Set the HLS decryption iv. Can be file, HEX or Base64
   --use-system-proxy                                      Use system default proxy [default: True]
   --custom-proxy <URL>                                    Set web request proxy, like http://127.0.0.1:8888
-  --custom-range <RANGE>                                  Download only part of the segments. Use "--morehelp
-                                                          custom-range" for more details
+  -4, --ipv4                                              Use IPv4 only for connections [default: False]
+  -6, --ipv6                                              Use IPv6 only for connections [default: False]
+  --http1.0                                               Use HTTP/1.0 [default: False]
+  --http1.1                                               Use HTTP/1.1 [default: False]
+  --http2                                                 Use HTTP/2 (ALPN on HTTPS) [default: True]
+  --http2-prior-knowledge                                 Use HTTP/2 with prior knowledge; cleartext HTTP uses H2C [default: False]
+  --custom-range <RANGE>                                  Download only part of the segments. Use "--morehelp custom-range" for more details
   --task-start-at <yyyyMMddHHmmss>                        Task execution will not start before this time
   --live-perform-as-vod                                   Download live streams as vod [default: False]
   --live-real-time-merge                                  Real-time merge into file when recording live [default: False]
-  --live-keep-segments                                    Keep segments when recording a live (liveRealTimeMerge
-                                                          enabled) [default: True]
-  --live-pipe-mux                                         Real-time muxing to TS file through pipeline + ffmpeg
-                                                          (liveRealTimeMerge enabled) [default: False]
-  --live-fix-vtt-by-audio                                 Correct VTT sub by reading the start time of the audio file
-                                                          [default: False]
+  --live-keep-segments                                    Keep segments when recording a live (liveRealTimeMerge enabled) [default: True]
+  --live-pipe-mux                                         Real-time muxing to TS file through pipeline + ffmpeg (liveRealTimeMerge enabled) [default: False]
+  --live-fix-vtt-by-audio                                 Correct VTT sub by reading the start time of the audio file [default: False]
+  --live-host-mirror <HOST>                               Extra mirror host(s) for live recording: each segment is fetched concurrently from the primary URL and mirrors; the first successful completion wins. Repeatable. Accepts hostname, host:port, or full http(s) URL.
   --live-record-limit <HH:mm:ss>                          Recording time limit when recording live
   --live-wait-time <SEC>                                  Manually set the live playlist refresh interval
-  --live-take-count <NUM>                                 Manually set the number of segments downloaded for the first
-                                                          time when recording live [default: 16]
-  --mux-import <OPTIONS>                                  When MuxAfterDone enabled, allow to import local media files.
-                                                          Use "--morehelp mux-import" for more details
-  -sv, --select-video <OPTIONS>                           Select video streams by regular expressions. Use "--morehelp
-                                                          select-video" for more details
-  -sa, --select-audio <OPTIONS>                           Select audio streams by regular expressions. Use "--morehelp
-                                                          select-audio" for more details
-  -ss, --select-subtitle <OPTIONS>                        Select subtitle streams by regular expressions. Use
-                                                          "--morehelp select-subtitle" for more details
+  --live-take-count <NUM>                                 Manually set the number of segments downloaded for the first time when recording live [default: 16]
+  --live-fill-segments-gap                                Auto-fill missing segments by predictable numeric naming pattern when the live playlist refreshes with gaps [default: True]
+  --live-fill-segments-gap-max <NUM>                      Maximum number of missing segments allowed when auto-filling segment gaps during live recording
+  --live-restart-on-ext-map-change                        When EXT-X-MAP changes during live recording, finish the current output and restart recording with the new init segment; disable to stop recording instead [default: True]
+  --mux-import <OPTIONS>                                  When MuxAfterDone enabled, allow to import local media files. Use "--morehelp mux-import" for more details
+  -sv, --select-video <OPTIONS>                           Select video streams by regular expressions. Use "--morehelp select-video" for more details
+  -sa, --select-audio <OPTIONS>                           Select audio streams by regular expressions. Use "--morehelp select-audio" for more details
+  -ss, --select-subtitle <OPTIONS>                        Select subtitle streams by regular expressions. Use "--morehelp select-subtitle" for more details
   -dv, --drop-video <OPTIONS>                             Drop video streams by regular expressions.
   -da, --drop-audio <OPTIONS>                             Drop audio streams by regular expressions.
   -ds, --drop-subtitle <OPTIONS>                          Drop subtitle streams by regular expressions.
   --ad-keyword <REG>                                      Set URL keywords (regular expressions) for AD segments
   --disable-update-check                                  Disable version update check [default: False]
-  --allow-hls-multi-ext-map                               Allow multiple #EXT-X-MAP in HLS (experimental) [default:
-                                                          False]
+  --allow-hls-multi-ext-map                               Allow multiple #EXT-X-MAP in HLS (experimental) [default: False]
   --morehelp <OPTION>                                     Set more help info about one option
-  --version                                               Show version information
   -?, -h, --help                                          Show help and usage information
+  --version                                               Show version information
 ```
 
 <details>
@@ -281,4 +326,7 @@ From v0.1.8, you can set the environment variable `RE_LIVE_PIPE_OPTIONS` to chan
 
 ## Donate
 
+Thanks to upstream author nilaoda for the original project.
+
 <a href="https://www.buymeacoffee.com/nilaoda" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+
