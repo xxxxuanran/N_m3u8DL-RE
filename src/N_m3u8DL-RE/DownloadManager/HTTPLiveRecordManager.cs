@@ -51,7 +51,8 @@ internal class HTTPLiveRecordManager
         var dirName = $"{DownloaderConfig.MyOptions.SaveName ?? NowDateTime.ToString("yyyy-MM-dd_HH-mm-ss")}_{task.Id}_{OtherUtil.GetValidFileName(streamSpec.GroupId ?? "", "-")}_{streamSpec.Codecs}_{streamSpec.Bandwidth}_{streamSpec.Language}";
         var saveDir = DownloaderConfig.MyOptions.SaveDir ?? Environment.CurrentDirectory;
 
-        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName）；
+        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName，
+        // <DateTime> 使用实时时间，长跑录制场景下能反映当前时刻）；
         // 否则使用运行时派生的 FileName（含 tmpDir 冲突时的时间戳后缀）
         var saveName = !string.IsNullOrWhiteSpace(DownloaderConfig.MyOptions.SavePattern)
             ? OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, streamSpec, DownloaderConfig.MyOptions.SaveName, task.Id)

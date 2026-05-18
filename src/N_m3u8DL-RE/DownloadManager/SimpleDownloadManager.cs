@@ -24,6 +24,9 @@ internal class SimpleDownloadManager
     StreamExtractor StreamExtractor;
     List<StreamSpec> SelectedSteams;
     List<OutputFile> OutputFiles = [];
+    // 任务起始时间：本次 VOD 下载（可能多流并发）共享同一 <DateTime> 展开值，
+    // 使同一任务内各流输出文件名时间戳一致
+    private readonly DateTime TaskStartTime = DateTime.Now;
 
     public SimpleDownloadManager(DownloaderConfig downloaderConfig, List<StreamSpec> selectedSteams, StreamExtractor streamExtractor)
     {
@@ -108,10 +111,11 @@ internal class SimpleDownloadManager
         var tmpDir = Path.Combine(DownloaderConfig.DirPrefix, dirName);
         var saveDir = DownloaderConfig.MyOptions.SaveDir ?? Environment.CurrentDirectory;
 
-        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName）；
+        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName，
+        // <DateTime> 使用 TaskStartTime 让同一任务内并发流的时间戳保持一致）；
         // 否则使用运行时派生的 FileName（含 tmpDir 冲突时的时间戳后缀）
         var saveName = !string.IsNullOrWhiteSpace(DownloaderConfig.MyOptions.SavePattern)
-            ? OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, streamSpec, DownloaderConfig.MyOptions.SaveName, task.Id)
+            ? OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, streamSpec, DownloaderConfig.MyOptions.SaveName, task.Id, TaskStartTime)
             : $"{DownloaderConfig.FileName}.{streamSpec.Language}".TrimEnd('.');
         var headers = DownloaderConfig.Headers;
 

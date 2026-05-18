@@ -195,7 +195,8 @@ internal class SimpleLiveRecordManager2
         var tmpDir = Path.Combine(DownloaderConfig.DirPrefix, dirName);
         var saveDir = DownloaderConfig.MyOptions.SaveDir ?? Environment.CurrentDirectory;
 
-        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName）；
+        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName，
+        // <DateTime> 使用实时时间，长跑直播/EXT-X-MAP 重启场景下能反映当前时刻）；
         // 否则使用运行时派生的 FileName（含 tmpDir 冲突时的时间戳后缀，直播重启时也已同步更新）
         var saveName = !string.IsNullOrWhiteSpace(DownloaderConfig.MyOptions.SavePattern)
             ? OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, streamSpec, DownloaderConfig.MyOptions.SaveName, task.Id)

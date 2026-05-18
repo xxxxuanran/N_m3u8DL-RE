@@ -171,6 +171,9 @@ internal static partial class OtherUtil
     [GeneratedRegex(@"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")]
     private static partial Regex TimeStrRegex();
 
+    [GeneratedRegex(@"<DateTime(?::([^>]+))?>")]
+    private static partial Regex DateTimeRegex();
+
     /// <summary>
     /// 格式化保存模板
     /// </summary>
@@ -178,8 +181,12 @@ internal static partial class OtherUtil
     /// <param name="streamSpec">流规格</param>
     /// <param name="saveName">保存名称</param>
     /// <param name="taskId">任务ID</param>
+    /// <param name="dateTimeBase">
+    /// &lt;DateTime&gt; 占位符使用的时间基准。传 <c>null</c> 表示使用 <see cref="DateTime.Now"/>（实时，适合长跑直播场景）；
+    /// 传具体值表示使用调用方提供的任务起始时间（适合多流并发 VOD，让同一任务内各流的输出文件名共享同一时间戳）。
+    /// </param>
     /// <returns>格式化后的文件名(不含扩展名)</returns>
-    public static string FormatSavePattern(string savePattern, Common.Entity.StreamSpec streamSpec, string? saveName, int taskId)
+    public static string FormatSavePattern(string savePattern, Common.Entity.StreamSpec streamSpec, string? saveName, int taskId, DateTime? dateTimeBase = null)
     {
         var result = savePattern;
 
@@ -195,6 +202,22 @@ internal static partial class OtherUtil
         result = result.Replace("<VideoRange>", streamSpec.VideoRange ?? "");
         result = result.Replace("<MediaType>", streamSpec.MediaType?.ToString() ?? "");
         result = result.Replace("<GroupId>", streamSpec.GroupId ?? "");
+
+        // 替换 <DateTime> / <DateTime:自定义格式>，自定义格式遵循 .NET DateTime 格式说明符
+        // dateTimeBase 为 null 时使用实时时间，否则使用调用方提供的任务起始时间
+        var nowOrBase = dateTimeBase ?? DateTime.Now;
+        result = DateTimeRegex().Replace(result, match =>
+        {
+            var format = match.Groups[1].Success ? match.Groups[1].Value : "yyyy-MM-dd_HH-mm-ss";
+            try
+            {
+                return nowOrBase.ToString(format);
+            }
+            catch (FormatException)
+            {
+                return match.Value;
+            }
+        });
 
         // 清理多余的分隔符
         result = result.Replace("__", "_").Replace("..", ".").Trim('_').Trim('.');

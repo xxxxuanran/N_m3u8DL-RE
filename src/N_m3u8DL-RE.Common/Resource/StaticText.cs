@@ -327,18 +327,21 @@ internal static class StaticText
             zhCN: "设置保存文件命名模板, 支持使用变量: \n" +
                   "<SaveName>, <Id>, <Codecs>, <Language>, <Resolution>, \n" +
                   "<Bandwidth>, <MediaType>, <Channels>, <FrameRate>, \n" +
-                  "<VideoRange>, <GroupId>, <Ext>\n" +
-                  "示例: --save-pattern \"<SaveName>_<Resolution>_<Bandwidth>\"",
+                  "<VideoRange>, <GroupId>, <Ext>, <DateTime>\n" +
+                  "<DateTime> 默认为 yyyy-MM-dd_HH-mm-ss, 也可使用 <DateTime:格式> 自定义 (.NET DateTime 格式)\n" +
+                  "示例: --save-pattern \"<SaveName>_<DateTime:yyyyMMdd>_<Resolution>\"",
             zhTW: "設置保存檔案命名模板, 支持使用變數: \n" +
                   "<SaveName>, <Id>, <Codecs>, <Language>, <Resolution>, \n" +
                   "<Bandwidth>, <MediaType>, <Channels>, <FrameRate>, \n" +
-                  "<VideoRange>, <GroupId>, <Ext>\n" +
-                  "示例: --save-pattern \"<SaveName>_<Resolution>_<Bandwidth>\"",
+                  "<VideoRange>, <GroupId>, <Ext>, <DateTime>\n" +
+                  "<DateTime> 預設為 yyyy-MM-dd_HH-mm-ss, 也可使用 <DateTime:格式> 自訂 (.NET DateTime 格式)\n" +
+                  "示例: --save-pattern \"<SaveName>_<DateTime:yyyyMMdd>_<Resolution>\"",
             enUS: "Set output filename pattern with variables: \n" +
                   "<SaveName>, <Id>, <Codecs>, <Language>, <Resolution>, \n" +
                   "<Bandwidth>, <MediaType>, <Channels>, <FrameRate>, \n" +
-                  "<VideoRange>, <GroupId>, <Ext>\n" +
-                  "Example: --save-pattern \"<SaveName>_<Resolution>_<Bandwidth>\""
+                  "<VideoRange>, <GroupId>, <Ext>, <DateTime>\n" +
+                  "<DateTime> defaults to yyyy-MM-dd_HH-mm-ss, or use <DateTime:format> for a custom .NET DateTime format\n" +
+                  "Example: --save-pattern \"<SaveName>_<DateTime:yyyyMMdd>_<Resolution>\""
         ),
         ["cmd_logFilePath"] = new TextContainer
         (
