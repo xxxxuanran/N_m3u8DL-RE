@@ -195,16 +195,11 @@ internal class SimpleLiveRecordManager2
         var tmpDir = Path.Combine(DownloaderConfig.DirPrefix, dirName);
         var saveDir = DownloaderConfig.MyOptions.SaveDir ?? Environment.CurrentDirectory;
 
-        // Use SavePattern if provided, otherwise use SaveName or dirName
-        var saveName = dirName;
-        if (!string.IsNullOrWhiteSpace(DownloaderConfig.MyOptions.SavePattern))
-        {
-            saveName = OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, streamSpec, DownloaderConfig.MyOptions.SaveName, task.Id);
-        }
-        else if (DownloaderConfig.MyOptions.SaveName != null)
-        {
-            saveName = $"{DownloaderConfig.MyOptions.SaveName}.{streamSpec.Language}".TrimEnd('.');
-        }
+        // SavePattern 优先（<SaveName> 始终展开为用户原值 MyOptions.SaveName）；
+        // 否则使用运行时派生的 FileName（含 tmpDir 冲突时的时间戳后缀，直播重启时也已同步更新）
+        var saveName = !string.IsNullOrWhiteSpace(DownloaderConfig.MyOptions.SavePattern)
+            ? OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, streamSpec, DownloaderConfig.MyOptions.SaveName, task.Id)
+            : $"{DownloaderConfig.FileName}.{streamSpec.Language}".TrimEnd('.');
         var headers = DownloaderConfig.Headers;
         var decryptEngine = DownloaderConfig.MyOptions.DecryptionEngine;
 

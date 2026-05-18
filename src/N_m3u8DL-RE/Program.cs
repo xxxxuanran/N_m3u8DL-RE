@@ -275,24 +275,24 @@ internal class Program
         // 可选字幕轨道
         var subs = lists.Where(x => x.MediaType == MediaType.SUBTITLES).ToList();
 
-        // 尝试从URL或文件读取文件名
+        // 尝试从URL或文件读取文件名（option.SaveName 此后视为用户原值，全程只读，
+        // 仅供 SavePattern 中 <SaveName> 展开使用）
         if (string.IsNullOrEmpty(option.SaveName))
         {
             option.SaveName = OtherUtil.GetFileNameFromInput(option.Input);
         }
 
-        // 生成文件夹
+        // 生成文件夹（运行时派生）
         var tmpDir = Path.Combine(option.TmpDir ?? Environment.CurrentDirectory, $"{option.SaveName ?? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss")}");
         // 确保 tmpDir 是空目录；若已存在残留内容（例如上次运行未清理），追加时间戳避免覆盖
         var originalTmpDir = tmpDir;
         tmpDir = OtherUtil.HandlePathCollision(tmpDir);
         if (tmpDir != originalTmpDir)
         {
-            // 同步更新 SaveName，使最终输出文件名后缀与 tmpDir 保持一致，
-            // 避免出现 tmpDir 带时间戳后缀而输出文件被回退为 .copy 后缀的不一致情况
-            option.SaveName = Path.GetFileName(tmpDir);
             Logger.WarnMarkUp($"[darkorange3_1]Tmp dir already exists and is not empty. Using [grey]{Path.GetFileName(tmpDir).EscapeMarkup()}[/] instead.[/]");
         }
+        // 运行时派生的输出文件名基础：始终与 tmpDir 目录名一致，承担"无 SavePattern 时的输出文件名"职责
+        var fileName = Path.GetFileName(tmpDir);
         // 记录文件
         if (option.WriteMetaJson)
         {
@@ -406,7 +406,7 @@ internal class Program
         Console.ReadKey();
 #endif
 
-        Logger.InfoMarkUp(ResString.saveName + $"[deepskyblue1]{option.SaveName.EscapeMarkup()}[/]");
+        Logger.InfoMarkUp(ResString.saveName + $"[deepskyblue1]{fileName.EscapeMarkup()}[/]");
 
         // 开始MuxAfterDone后自动使用二进制版
         if (option is { BinaryMerge: false, MuxAfterDone: true })
@@ -420,6 +420,7 @@ internal class Program
         {
             MyOptions = option,
             DirPrefix = tmpDir,
+            FileName = fileName,
             Headers = parserConfig.Headers, // 使用命令行解析得到的Headers
         };
 
@@ -449,13 +450,9 @@ internal class Program
                 await extractor.RefreshPlayListAsync(selectedStreams);
                 // 上一场次已经在 DirPrefix 中写入了 _init.mp4 / _init_dec.mp4 等内容，
                 // 新场次必须使用空目录，否则解密阶段 File.Move 会因目标已存在而抛 IOException
-                var originalDirPrefix = downloadConfig.DirPrefix;
                 downloadConfig.DirPrefix = OtherUtil.HandlePathCollision(downloadConfig.DirPrefix);
-                if (downloadConfig.DirPrefix != originalDirPrefix)
-                {
-                    // 同步更新 SaveName，保持与新 DirPrefix 后缀一致，避免新场次的输出文件被回退为 .copy 后缀
-                    option.SaveName = Path.GetFileName(downloadConfig.DirPrefix);
-                }
+                // FileName 与 DirPrefix 始终保持一致，避免新场次输出文件被回退为 .copy 后缀
+                downloadConfig.FileName = Path.GetFileName(downloadConfig.DirPrefix);
                 Logger.WarnMarkUp("[darkorange3_1]Restarting live recording with the refreshed EXT-X-MAP.[/]");
             }
         }
