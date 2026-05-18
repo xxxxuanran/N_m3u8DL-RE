@@ -268,6 +268,12 @@ internal static class StaticText
             zhTW: "錄製直播自動補齊缺失分片時允許補齊的最大數量",
             enUS: "Maximum number of missing segments allowed when auto-filling segment gaps during live recording"
         ),
+        ["cmd_liveRestartOnExtMapChange"] = new TextContainer
+        (
+            zhCN: "录制直播时若检测到EXT-X-MAP变动，自动收尾当前输出并以新的初始化分片重启录制；关闭时将直接停止录制",
+            zhTW: "錄製直播時若檢測到EXT-X-MAP變動，自動收尾當前輸出並以新的初始化分片重啟錄製；關閉時將直接停止錄製",
+            enUS: "When EXT-X-MAP changes during live recording, finish the current output and restart recording with the new init segment; disable to stop recording instead"
+        ),
         ["cmd_header"] = new TextContainer
         (
             zhCN: "为HTTP请求设置特定的请求头, 例如:\r\n-H \"Cookie: mycookie\" -H \"User-Agent: iOS\"",

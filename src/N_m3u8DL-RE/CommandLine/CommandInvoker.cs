@@ -112,6 +112,7 @@ internal static partial class CommandInvoker
     private static readonly Option<bool> LiveFixVttByAudio = new Option<bool>("--live-fix-vtt-by-audio") { Description = ResString.cmd_liveFixVttByAudio }.WithDefault(false);
     private static readonly Option<bool> LiveFillSegmentsGap = new Option<bool>("--live-fill-segments-gap") { Description = ResString.cmd_liveFillSegmentsGap }.WithDefault(true);
     private static readonly Option<long> LiveFillSegmentsGapMax = new("--live-fill-segments-gap-max") { HelpName = "NUM", Description = ResString.cmd_liveFillSegmentsGapMax, DefaultValueFactory = _ => 100L };
+    private static readonly Option<bool> LiveRestartOnExtMapChange = new Option<bool>("--live-restart-on-ext-map-change") { Description = ResString.cmd_liveRestartOnExtMapChange }.WithDefault(true);
     private static readonly Option<string[]?> LiveHostMirror = new("--live-host-mirror")
     {
         HelpName = "HOST",
@@ -687,6 +688,7 @@ internal static partial class CommandInvoker
             LiveHostMirrors = result.GetValue(LiveHostMirror),
             LiveFillSegmentsGap = result.GetValue(LiveFillSegmentsGap),
             LiveFillSegmentsGapMax = result.GetValue(LiveFillSegmentsGapMax),
+            LiveRestartOnExtMapChange = result.GetValue(LiveRestartOnExtMapChange),
             NoDateInfo = result.GetValue(NoDateInfo),
             NoLog = result.GetValue(NoLog),
             LogFileOnly = result.GetValue(LogFileOnly),
@@ -777,7 +779,7 @@ internal static partial class CommandInvoker
             MaxSpeed,
             MuxAfterDone,
             CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, ForceIpv4, ForceIpv6, Http10, Http11, Http2, Http2PriorKnowledge, CustomRange, TaskStartAt,
-            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveFillSegmentsGap, LiveFillSegmentsGapMax,
+            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveFillSegmentsGap, LiveFillSegmentsGapMax, LiveRestartOnExtMapChange,
             MuxImports, VideoFilter, AudioFilter, SubtitleFilter, DropVideoFilter, DropAudioFilter, DropSubtitleFilter, AdKeywords, DisableUpdateCheck, AllowHlsMultiExtMap, MoreHelp
         };
 

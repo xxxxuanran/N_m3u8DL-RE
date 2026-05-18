@@ -60,8 +60,15 @@ internal class SimpleLiveRecordManager2
         {
             if (STOP_FLAG) return;
 
-            ShouldRestartOnMediaInitChanged = true;
-            Logger.WarnMarkUp("[darkorange3_1]Detected EXT-X-MAP change. Will finish current output and start a new live recording file.[/]");
+            if (DownloaderConfig.MyOptions.LiveRestartOnExtMapChange)
+            {
+                ShouldRestartOnMediaInitChanged = true;
+                Logger.WarnMarkUp("[darkorange3_1]Detected EXT-X-MAP change. Will finish current output and start a new live recording file.[/]");
+            }
+            else
+            {
+                Logger.WarnMarkUp("[darkorange3_1]Detected EXT-X-MAP change. Will stop recording soon (auto-restart disabled).[/]");
+            }
             STOP_FLAG = true;
             CancellationTokenSource.Cancel();
         }

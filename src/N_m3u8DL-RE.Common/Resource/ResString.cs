@@ -101,6 +101,7 @@ public static class ResString
     public static string cmd_liveFixVttByAudio => GetText("cmd_liveFixVttByAudio");
     public static string cmd_liveFillSegmentsGap => GetText("cmd_liveFillSegmentsGap");
     public static string cmd_liveFillSegmentsGapMax => GetText("cmd_liveFillSegmentsGapMax");
+    public static string cmd_liveRestartOnExtMapChange => GetText("cmd_liveRestartOnExtMapChange");
     public static string cmd_liveRealTimeMerge => GetText("cmd_liveRealTimeMerge");
     public static string cmd_livePerformAsVod => GetText("cmd_livePerformAsVod");
     public static string cmd_muxAfterDone => GetText("cmd_muxAfterDone");
