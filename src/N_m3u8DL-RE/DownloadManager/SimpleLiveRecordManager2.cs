@@ -189,6 +189,7 @@ internal class SimpleLiveRecordManager2
         var readInfo = false; // 是否读取过
         bool useAACFilter = false; // ffmpeg合并flag
         bool initDownloaded = false; // 是否下载过init文件
+        bool initWritten = false; // fmp4的init(ftyp+moov)是否已写入输出流(只能写一次)
         ConcurrentDictionary<MediaSegment, DownloadResult?> FileDic = new();
         List<Mediainfo> mediaInfos = [];
         Stream? fileOutputStream = null;
@@ -596,12 +597,16 @@ internal class SimpleLiveRecordManager2
                 {
                     var initResult = streamSpec.Playlist!.MediaInit != null ? FileDic[streamSpec.Playlist!.MediaInit!]! : null;
                     var files = FileDic.Where(f => f.Key != streamSpec.Playlist!.MediaInit).OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
-                    if (initResult != null && mp4InitFile != "")
+                    // fmp4 的 init(ftyp+moov) 只需在输出流开头写入一次。
+                    // 直播每轮刷新都会进入本方法，若每轮都前置 init，会在单个输出文件里
+                    // 嵌入大量重复的 moov，导致 ffmpeg 报 "Found duplicated MOOV Atom" 且播放器索引缓慢。
+                    if (initResult != null && mp4InitFile != "" && !initWritten)
                     {
                         // shaka/ffmpeg实时解密不需要init文件用于合并，mp4decrpyt需要
                         if (string.IsNullOrEmpty(currentKID) || decryptEngine == DecryptEngine.MP4DECRYPT)
                         {
                             files = [initResult.ActualFilePath, ..files];
+                            initWritten = true;
                         }
                     }
                     foreach (var inputFilePath in files)
