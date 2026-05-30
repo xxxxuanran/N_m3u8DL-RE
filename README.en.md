@@ -12,19 +12,19 @@ If you encounter a bug, please confirm you are on the latest [Release](https://g
 
 ## Download
 
-Get prebuilt packages from [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases). Pushing a tag such as `v0.6.0` triggers GitHub Actions to build and publish artifacts for all supported platforms.
+Get prebuilt packages from [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases). Pushing a tag such as `v0.6.1-beta` triggers GitHub Actions to build and publish artifacts for all supported platforms.
 
 | Platform | Example filename |
 |----------|------------------|
-| Windows x64 | `N_m3u8DL-RE_v0.6.0_win-x64_*.zip` |
-| Windows arm64 | `N_m3u8DL-RE_v0.6.0_win-arm64_*.zip` |
-| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.0_win-NT6.0-x86_*.zip` |
-| Linux x64 (static musl) | `N_m3u8DL-RE_v0.6.0_linux-x64_*.tar.gz` |
-| Linux arm64 (static musl) | `N_m3u8DL-RE_v0.6.0_linux-arm64_*.tar.gz` |
-| macOS x64 | `N_m3u8DL-RE_v0.6.0_osx-x64_*.tar.gz` |
-| macOS arm64 | `N_m3u8DL-RE_v0.6.0_osx-arm64_*.tar.gz` |
+| Windows x64 | `N_m3u8DL-RE_v0.6.1-beta_win-x64_*.zip` |
+| Windows arm64 | `N_m3u8DL-RE_v0.6.1-beta_win-arm64_*.zip` |
+| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.1-beta_win-NT6.0-x86_*.zip` |
+| Linux x64 (static musl) | `N_m3u8DL-RE_v0.6.1-beta_linux-x64_*.tar.gz` |
+| Linux arm64 (static musl) | `N_m3u8DL-RE_v0.6.1-beta_linux-arm64_*.tar.gz` |
+| macOS x64 | `N_m3u8DL-RE_v0.6.1-beta_osx-x64_*.tar.gz` |
+| macOS arm64 | `N_m3u8DL-RE_v0.6.1-beta_osx-arm64_*.tar.gz` |
 
-Linux builds are fully static (musl). A release build shows e.g. `N_m3u8DL-RE (Beta version) 20260518+v0.6.0`; local builds off a non-tag commit may show `yyyyMMdd+<commit>`.
+Linux builds are fully static (musl). A release build shows e.g. `N_m3u8DL-RE (Beta version) 20260531+v0.6.1-beta`; local builds off a non-tag commit may show `yyyyMMdd+<commit>`.
 
 ---
 
@@ -53,7 +53,7 @@ This fork extends [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 
 | Option | Description |
 |--------|-------------|
 | `--live-host-mirror <HOST>` | Extra mirror host(s) for live segments: fetch concurrently from the primary URL and mirrors; **first successful response wins**. Repeatable; accepts `hostname`, `host:port`, or full `http(s)://` URL. |
-| `--live-fill-segments-gap` | When the media playlist has sequence gaps, **auto-fill** missing segments by predictable numeric naming (default: on). |
+| `--live-fill-segments-gap` | When the media playlist has sequence gaps, **auto-fill** missing segments by predictable numeric naming (default: on). Gap fill runs only if the initial media playlist has identical URL query strings across segments. |
 | `--live-fill-segments-gap-max <NUM>` | Max segments to fill per gap-fill pass. When omitted, defaults to `max(1, 60 ÷ refresh interval in seconds)`, where the interval is derived from the M3U8 playlist (roughly half the sum of segment durations in that refresh, minus 2s), or overridden by `--live-wait-time`. |
 | `--live-restart-on-ext-map-change` | On `EXT-X-MAP` (init segment) change, **finalize current output and restart** with the new init segment (default: on). Set to `false` to stop recording instead (closer to legacy upstream behavior). |
 
@@ -71,12 +71,15 @@ This fork extends [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 
 - **Bilibili** DRM key type (`bilidrm`) support.
 - Fix **temp directory reuse** when launching duplicate runs with the same arguments.
 - Release builds ship **fully static Linux musl** binaries (see Download table above).
+- Write fmp4 init segment **only once** during live real-time merge.
+- Improve mux output naming and finalize rename safety.
+- Gate live segment gap fill on **consistent URL query** checked at the first media playlist.
 
 > From `N_m3u8DL-RE --help` on a local win-x64 Native AOT build (`artifact-x64-publish`).
 
 ```
 Description:
-  N_m3u8DL-RE (Beta version) 20260518+v0.6.0
+  N_m3u8DL-RE (Beta version) 20260531+v0.6.1-beta
 
 Usage:
   N_m3u8DL-RE <input> [options]

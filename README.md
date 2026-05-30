@@ -14,19 +14,19 @@
 
 ## 下载
 
-从 [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases) 页面下载与系统匹配的压缩包。推送形如 `v0.6.0` 的 Git 标签后，GitHub Actions 会自动构建并发布各平台产物。
+从 [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases) 页面下载与系统匹配的压缩包。推送形如 `v0.6.1-beta` 的 Git 标签后，GitHub Actions 会自动构建并发布各平台产物。
 
 | 平台 | 文件名示例 |
 |------|------------|
-| Windows x64 | `N_m3u8DL-RE_v0.6.0_win-x64_*.zip` |
-| Windows arm64 | `N_m3u8DL-RE_v0.6.0_win-arm64_*.zip` |
-| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.0_win-NT6.0-x86_*.zip` |
-| Linux x64 (musl 静态) | `N_m3u8DL-RE_v0.6.0_linux-x64_*.tar.gz` |
-| Linux arm64 (musl 静态) | `N_m3u8DL-RE_v0.6.0_linux-arm64_*.tar.gz` |
-| macOS x64 | `N_m3u8DL-RE_v0.6.0_osx-x64_*.tar.gz` |
-| macOS arm64 | `N_m3u8DL-RE_v0.6.0_osx-arm64_*.tar.gz` |
+| Windows x64 | `N_m3u8DL-RE_v0.6.1-beta_win-x64_*.zip` |
+| Windows arm64 | `N_m3u8DL-RE_v0.6.1-beta_win-arm64_*.zip` |
+| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.1-beta_win-NT6.0-x86_*.zip` |
+| Linux x64 (musl 静态) | `N_m3u8DL-RE_v0.6.1-beta_linux-x64_*.tar.gz` |
+| Linux arm64 (musl 静态) | `N_m3u8DL-RE_v0.6.1-beta_linux-arm64_*.tar.gz` |
+| macOS x64 | `N_m3u8DL-RE_v0.6.1-beta_osx-x64_*.tar.gz` |
+| macOS arm64 | `N_m3u8DL-RE_v0.6.1-beta_osx-arm64_*.tar.gz` |
 
-Linux 产物为 musl 完全静态链接，可在多数发行版上直接运行。正式 Release 构建启动时版本示例：`N_m3u8DL-RE (Beta version) 20260518+v0.6.0`；在非 tag 提交上本地编译时可能显示 `yyyyMMdd+<commit>`。
+Linux 产物为 musl 完全静态链接，可在多数发行版上直接运行。正式 Release 构建启动时版本示例：`N_m3u8DL-RE (Beta version) 20260531+v0.6.1-beta`；在非 tag 提交上本地编译时可能显示 `yyyyMMdd+<commit>`。
 
 ---
 
@@ -55,7 +55,7 @@ yay -Syu n-m3u8dl-re-git
 | 参数 | 说明 |
 |------|------|
 | `--live-host-mirror <HOST>` | 为直播分片配置镜像 Host，主 URL 与各镜像**并发拉取**，采用最先成功的结果。可重复指定；支持 `hostname`、`host:port` 或完整 `http(s)://` URL。 |
-| `--live-fill-segments-gap` | 刷新播放列表出现序号间隙时，按连续数字规律**自动补齐**缺失分片（默认开启）。 |
+| `--live-fill-segments-gap` | 刷新播放列表出现序号间隙时，按连续数字规律**自动补齐**缺失分片（默认开启）。仅在首次 media playlist 确认各 segment URL query 一致时才会补齐。 |
 | `--live-fill-segments-gap-max <NUM>` | 单次自动补齐允许填补的最大分片数量。未指定时默认为 `max(1, 60 ÷ 刷新间隔秒数)`，其中刷新间隔取自 M3U8 播放列表（约为该次列表内分片总时长的一半再提前 2 秒），也可由 `--live-wait-time` 覆盖。 |
 | `--live-restart-on-ext-map-change` | 检测到 `EXT-X-MAP`（初始化分片）变化时，**收尾当前文件并以新 init 分片继续录制**（默认开启）。设为 `false` 时改为直接停止录制（与上游旧行为接近）。 |
 
@@ -73,10 +73,13 @@ yay -Syu n-m3u8dl-re-git
 - 支持 **bilibili** 相关 DRM 密钥类型（`bilidrm`）。
 - 修复相同参数重复启动时**临时目录冲突**的问题。
 - Release 构建提供 **Linux musl 完全静态**二进制（见上方「下载」表格）。
+- 直播实时合并时 fmp4 init 分片**只写入一次**，避免重复头数据。
+- 改进 mux 输出命名与最终重命名的安全性。
+- 直播 gap fill 在首次 media playlist 确认各 segment **URL query 一致**后才启用，避免误补分片。
 
 ```
 Description:
-  N_m3u8DL-RE (Beta version) 20260518+v0.6.0
+  N_m3u8DL-RE (Beta version) 20260531+v0.6.1-beta
 
 Usage:
   N_m3u8DL-RE <input> [options]
