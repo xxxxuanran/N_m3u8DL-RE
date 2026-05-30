@@ -35,6 +35,7 @@ internal class SimpleLiveRecordManager2
     ConcurrentDictionary<int, int> RefreshedDurDic = new(); // 已刷新出的时长
     ConcurrentDictionary<int, BufferBlock<List<MediaSegment>>> BlockDic = new(); // 各流的Block
     ConcurrentDictionary<int, bool> SamePathDic = new(); // 各流是否allSamePath
+    ConcurrentDictionary<int, bool> SameQueryDic = new(); // 各流 segment URL query 是否一致（首次 playlist 时判定）
     ConcurrentDictionary<int, bool> RecordLimitReachedDic = new(); // 各流是否达到上限
     ConcurrentDictionary<int, string> LastFileNameDic = new(); // 上次下载的文件名
     ConcurrentDictionary<int, long> MaxIndexDic = new(); // 最大Index
@@ -848,11 +849,12 @@ internal class SimpleLiveRecordManager2
     /// 触发条件（全部满足）：
     ///   1. 新 playlist 至少有 2 个 segment
     ///   2. 新 playlist 所有 segment 的 Index 严格连续（差值 1）
-    ///   3. 新 playlist 所有 segment 的 URL 文件名（去除扩展名）是纯数字且与 Index 相等
-    ///   4. 所有 segment 加密方式相同
-    ///   5. 上次记录的 LastFileName 也是纯数字且与 MaxIndexDic 一致
-    ///   6. 新 playlist 首个 segment 的 Index 严格大于 MaxIndexDic + 1（存在间隙）
-    ///   7. 缺失数量不超过上限（防止过度补齐）
+    ///   3. 首次 media playlist 时所有 segment 的 URL query string 相同
+    ///   4. 新 playlist 所有 segment 的 URL 文件名（去除扩展名）是纯数字且与 Index 相等
+    ///   5. 所有 segment 加密方式相同
+    ///   6. 上次记录的 LastFileName 也是纯数字且与 MaxIndexDic 一致
+    ///   7. 新 playlist 首个 segment 的 Index 严格大于 MaxIndexDic + 1（存在间隙）
+    ///   8. 缺失数量不超过上限（防止过度补齐）
     /// </summary>
     private void TryFillMissingSegments(StreamSpec streamSpec, ProgressTask task)
     {
@@ -868,6 +870,10 @@ internal class SimpleLiveRecordManager2
 
         // 校验 LastFileName 也是纯数字且与 oldMax 一致
         if (!long.TryParse(LastFileNameDic[task.Id], out var lastNumber) || lastNumber != oldMax)
+            return;
+
+        // query 一致性在首次 media playlist 时已判定，此处不再重复
+        if (!SameQueryDic.GetValueOrDefault(task.Id))
             return;
 
         // 验证所有 segment 都符合"连续数字命名"模式
@@ -922,6 +928,31 @@ internal class SimpleLiveRecordManager2
 
         Logger.WarnMarkUp($"[darkorange3_1]Detected {fillList.Count} missing segment(s), filling: {fillList[0].Index} ~ {fillList[^1].Index}[/]");
         streamSpec.Playlist!.MediaParts[0].MediaSegments = fillList.Concat(newSegments).ToList();
+    }
+
+    /// <summary>
+    /// 判断 playlist 中所有 segment 的 URL query string 是否相同
+    /// </summary>
+    private static bool CheckAllSegmentsSameQuery(IReadOnlyList<MediaSegment> segments)
+    {
+        if (segments.Count < 2) return true;
+
+        var firstQuery = GetUrlQuery(segments[0].Url);
+        for (var i = 1; i < segments.Count; i++)
+        {
+            if (GetUrlQuery(segments[i].Url) != firstQuery)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// 从 URL 中取 query string（含前导 ?，无 query 时返回空字符串）
+    /// </summary>
+    private static string GetUrlQuery(string url)
+    {
+        var questionIdx = url.IndexOf('?');
+        return questionIdx >= 0 ? url[questionIdx..] : string.Empty;
     }
 
     /// <summary>
@@ -1031,6 +1062,7 @@ internal class SimpleLiveRecordManager2
                 RecordedDurDic[task.Id] = 0;
                 RefreshedDurDic[task.Id] = 0;
                 MaxIndexDic[task.Id] = item.Playlist?.MediaParts[0].MediaSegments.LastOrDefault()?.Index ?? 0L; // 最大Index
+                SameQueryDic[task.Id] = CheckAllSegmentsSameQuery(item.Playlist?.MediaParts[0].MediaSegments ?? []);
                 BlockDic[task.Id] = new BufferBlock<List<MediaSegment>>();
                 return (item, task);
             }).ToDictionary(item => item.item, item => item.task);
