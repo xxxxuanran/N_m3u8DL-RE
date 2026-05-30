@@ -1082,6 +1082,8 @@ internal class SimpleLiveRecordManager2
             {
                 OutputFiles = OutputFiles.Where(o => o.MediaType != MediaType.SUBTITLES).ToList();
             }
+            var muxBaseName = OtherUtil.GetMuxInputBaseName(OutputFiles)
+                ?? Path.GetFileName(DownloaderConfig.DirPrefix);
             if (DownloaderConfig.MyOptions.MuxImports != null)
             {
                 OutputFiles.AddRange(DownloaderConfig.MyOptions.MuxImports);
@@ -1089,10 +1091,8 @@ internal class SimpleLiveRecordManager2
             OutputFiles.ForEach(f => Logger.WarnMarkUp($"[grey]{Path.GetFileName(f.FilePath).EscapeMarkup()}[/]"));
             var saveDir = DownloaderConfig.MyOptions.SaveDir ?? Environment.CurrentDirectory;
             var ext = OtherUtil.GetMuxExtension(DownloaderConfig.MyOptions.MuxOptions.MuxFormat);
-            var dirName = Path.GetFileName(DownloaderConfig.DirPrefix);
-            var outName = $"{dirName}.MUX";
-            var outPath = Path.Combine(saveDir, outName);
-            Logger.WarnMarkUp($"Muxing to [grey]{outName.EscapeMarkup()}{ext}[/]");
+            var outPath = Path.Combine(saveDir, $"{muxBaseName}.MUX");
+            Logger.WarnMarkUp($"Muxing to [grey]{Path.GetFileName(outPath).EscapeMarkup()}{ext}[/]");
             var result = false;
             if (DownloaderConfig.MyOptions.MuxOptions.UseMkvmerge) result = MergeUtil.MuxInputsByMkvmerge(DownloaderConfig.MyOptions.MkvmergeBinaryPath!, OutputFiles.ToArray(), outPath);
             else result = MergeUtil.MuxInputsByFFmpeg(DownloaderConfig.MyOptions.FFmpegBinaryPath!, OutputFiles.ToArray(), outPath, DownloaderConfig.MyOptions.MuxOptions.MuxFormat, !DownloaderConfig.MyOptions.NoDateInfo);
@@ -1106,18 +1106,16 @@ internal class SimpleLiveRecordManager2
                     var tmpDir = DownloaderConfig.MyOptions.TmpDir ?? Environment.CurrentDirectory;
                     OtherUtil.SafeDeleteDir(tmpDir);
                 }
+
+                var intermediatePath = outPath + ext;
+                var finalPath = Path.Combine(saveDir, muxBaseName + ext);
+                OtherUtil.TryFinalizeMuxOutput(intermediatePath, finalPath, name =>
+                    Logger.WarnMarkUp($"Rename to [grey]{name.EscapeMarkup()}[/]"));
             }
             else
             {
                 success = false;
                 Logger.ErrorMarkUp($"Mux failed");
-            }
-            // 判断是否要改名
-            var newPath = Path.ChangeExtension(outPath, ext);
-            if (result && !File.Exists(newPath))
-            {
-                Logger.WarnMarkUp($"Rename to [grey]{Path.GetFileName(newPath).EscapeMarkup()}[/]");
-                File.Move(outPath + ext, newPath);
             }
         }
 

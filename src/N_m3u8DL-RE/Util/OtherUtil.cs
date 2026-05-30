@@ -1,3 +1,5 @@
+using N_m3u8DL_RE.Common.Enum;
+using N_m3u8DL_RE.Entity;
 using N_m3u8DL_RE.Enum;
 using System.IO.Compression;
 using System.Text.RegularExpressions;
@@ -224,6 +226,34 @@ internal static partial class OtherUtil
 
         // 清理文件名中的非法字符
         return GetValidFileName(result);
+    }
+
+    /// <summary>
+    /// 从 mux 输入轨道文件取 basename（去掉扩展名），优先主视频轨。
+    /// </summary>
+    public static string? GetMuxInputBaseName(IReadOnlyList<OutputFile> outputFiles)
+    {
+        if (outputFiles.Count == 0) return null;
+
+        var primary = outputFiles
+            .Where(o => o.MediaType is null or MediaType.VIDEO)
+            .OrderBy(o => o.Index)
+            .FirstOrDefault()
+            ?? outputFiles.OrderBy(o => o.Index).FirstOrDefault();
+
+        return primary == null ? null : Path.GetFileNameWithoutExtension(primary.FilePath);
+    }
+
+    /// <summary>
+    /// 混流完成后：若最终文件名不存在则去掉 <c>.MUX</c> 后缀；若已存在则保留中间产物名。
+    /// </summary>
+    public static void TryFinalizeMuxOutput(string intermediatePath, string finalPath, Action<string>? logRename = null)
+    {
+        if (!File.Exists(intermediatePath) || File.Exists(finalPath))
+            return;
+
+        logRename?.Invoke(Path.GetFileName(finalPath));
+        File.Move(intermediatePath, finalPath);
     }
 
     /// <summary>
