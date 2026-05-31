@@ -30,7 +30,8 @@ internal class SimpleLiveRecordManager2
     List<OutputFile> OutputFiles = [];
     DateTime? PublishDateTime;
     bool STOP_FLAG = false;
-    int WAIT_SEC = 0; // 刷新间隔
+    int WAIT_SEC = 0; // 基础刷新间隔（正常轮询）
+    bool WAIT_FROM_TARGET_DURATION = false; // 基础间隔是否来自 #EXT-X-TARGETDURATION（决定是否启用降级轮询）
     ConcurrentDictionary<int, int> RecordedDurDic = new(); // 已录制时长
     ConcurrentDictionary<int, int> RefreshedDurDic = new(); // 已刷新出的时长
     ConcurrentDictionary<int, BufferBlock<List<MediaSegment>>> BlockDic = new(); // 各流的Block
@@ -698,6 +699,10 @@ internal class SimpleLiveRecordManager2
         {
             if (WAIT_SEC == 0) continue;
 
+            // 本轮刷新是否抓到了新分片（任一流的最后一个分片发生了变化）
+            // 用于决定下一次等待采用正常轮询还是降级轮询
+            var updatedStreamCount = 0;
+
             // 1. MPD 所有URL相同 单次请求即可获得所有轨道的信息
             // 2. M3U8 所有URL不同 才需要多次请求
             await Parallel.ForEachAsync(dic, async (dic, _) =>
@@ -733,6 +738,8 @@ internal class SimpleLiveRecordManager2
                 var newList = streamSpec.Playlist!.MediaParts[0].MediaSegments;
                 if (newList.Count > 0)
                 {
+                    // 最后一个分片发生了变化，说明服务器有更新
+                    Interlocked.Increment(ref updatedStreamCount);
                     task.MaxValue += newList.Count;
                     // 推送给消费者
                     await BlockDic[task.Id].SendAsync(newList);
@@ -767,10 +774,21 @@ internal class SimpleLiveRecordManager2
                 }
             }
 
+            // 计算本次等待时长：
+            // - 正常轮询：距离上一次请求满 WAIT_SEC（基础间隔，HLS 下为 #EXT-X-TARGETDURATION）后再请求
+            // - 降级轮询：基础间隔来自 TARGETDURATION 且本轮未抓到任何新分片（服务器产出慢），
+            //   则改为 TARGETDURATION / 2 后重试，尽快追上更新
+            var waitSec = WAIT_SEC;
+            if (WAIT_FROM_TARGET_DURATION && updatedStreamCount == 0)
+            {
+                waitSec = Math.Max(1, WAIT_SEC / 2);
+                Logger.Debug($"no new segments, degrade refresh interval to {waitSec} seconds");
+            }
+
             try
             {
                 // Logger.WarnMarkUp($"wait {waitSec}s");
-                if (!STOP_FLAG) await Task.Delay(WAIT_SEC * 1000, CancellationTokenSource.Token);
+                if (!STOP_FLAG) await Task.Delay(waitSec * 1000, CancellationTokenSource.Token);
                 // 刷新列表
                 if (!STOP_FLAG) await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList());
             }
@@ -1003,12 +1021,25 @@ internal class SimpleLiveRecordManager2
         // 设置等待时间
         if (WAIT_SEC == 0)
         {
-            WAIT_SEC = (int)(SelectedSteams.Min(s => s.Playlist!.MediaParts[0].MediaSegments.Sum(s => s.Duration)) / 2);
-            WAIT_SEC -= 2; // 再提前两秒吧 留出冗余
             if (DownloaderConfig.MyOptions.LiveWaitTime != null)
+            {
+                // 用户手动指定刷新间隔，优先级最高
                 WAIT_SEC = DownloaderConfig.MyOptions.LiveWaitTime.Value;
+            }
+            else if (SelectedSteams.All(s => s.Playlist!.TargetDuration is > 0))
+            {
+                // 优先以 #EXT-X-TARGETDURATION 作为基础轮询等待时长（取各流最小值，保证最快流不丢片）
+                WAIT_SEC = (int)Math.Ceiling(SelectedSteams.Min(s => s.Playlist!.TargetDuration!.Value));
+                WAIT_FROM_TARGET_DURATION = true;
+            }
+            else
+            {
+                // 后备方案：没有 #EXT-X-TARGETDURATION 时，按 总分片时长/2 - 2 估算
+                WAIT_SEC = (int)(SelectedSteams.Min(s => s.Playlist!.MediaParts[0].MediaSegments.Sum(s => s.Duration)) / 2);
+                WAIT_SEC -= 2; // 再提前两秒吧 留出冗余
+            }
             if (WAIT_SEC <= 0) WAIT_SEC = 1;
-            Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds");
+            Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds{(WAIT_FROM_TARGET_DURATION ? " (based on #EXT-X-TARGETDURATION)" : "")}");
             DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= Math.Max(1L, 60L / WAIT_SEC);
         }
         // 如果没有选中音频 取消通过音频修复vtt时间轴
