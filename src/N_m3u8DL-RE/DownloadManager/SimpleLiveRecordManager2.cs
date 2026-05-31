@@ -36,7 +36,7 @@ internal class SimpleLiveRecordManager2
     ConcurrentDictionary<int, int> RefreshedDurDic = new(); // 已刷新出的时长
     ConcurrentDictionary<int, BufferBlock<List<MediaSegment>>> BlockDic = new(); // 各流的Block
     ConcurrentDictionary<int, bool> SamePathDic = new(); // 各流是否allSamePath
-    ConcurrentDictionary<int, bool> SameQueryDic = new(); // 各流 segment URL query 是否一致（首次 playlist 时判定）
+    ConcurrentDictionary<int, SegmentUrlPatternCheck> SegmentUrlPatternDic = new(); // 各已选 media playlist 的首次 segment URL 规律预检结果
     ConcurrentDictionary<int, bool> RecordLimitReachedDic = new(); // 各流是否达到上限
     ConcurrentDictionary<int, string> LastFileNameDic = new(); // 上次下载的文件名
     ConcurrentDictionary<int, long> MaxIndexDic = new(); // 最大Index
@@ -46,6 +46,18 @@ internal class SimpleLiveRecordManager2
     private readonly Lock lockObj = new();
     TimeSpan? audioStart = null;
     public bool ShouldRestartOnMediaInitChanged { get; private set; } = false;
+
+    private readonly record struct SegmentUrlParts(string Path, string Query, string FileNameWithoutExtension, string Extension);
+
+    private readonly record struct SegmentUrlPatternCheck(bool SameQuery, bool NumericFileNameMatchesIndex);
+
+    private enum SegmentGapSource
+    {
+        BetweenPlaylistRefreshes,
+        CurrentPlaylist,
+    }
+
+    private readonly record struct MissingSegmentRange(long Start, long End, SegmentGapSource Source);
 
     public SimpleLiveRecordManager2(DownloaderConfig downloaderConfig, List<StreamSpec> selectedSteams, StreamExtractor streamExtractor)
     {
@@ -816,11 +828,19 @@ internal class SimpleLiveRecordManager2
         var index = -1;
         var dateTime = DateTimeDic[task.Id];
         var lastName = LastFileNameDic[task.Id];
+        var lastUrlNumber = 0L;
+        var usePredictableUrlPattern = DownloaderConfig.MyOptions.LiveFillSegmentsGap
+            && TryGetPredictableSegmentUrlPattern(task, out _)
+            && long.TryParse(lastName, out lastUrlNumber);
 
         // 优先使用dateTime判断
         if (dateTime != 0 && streamSpec.Playlist!.MediaParts[0].MediaSegments.All(s => s.DateTime != null))
         {
             index = streamSpec.Playlist!.MediaParts[0].MediaSegments.FindIndex(s => GetUnixTimestamp(s.DateTime!.Value) == dateTime);
+        }
+        else if (usePredictableUrlPattern)
+        {
+            index = FindSegmentIndexByUrlNumber(streamSpec.Playlist!.MediaParts[0].MediaSegments, lastUrlNumber);
         }
         else
         {
@@ -833,6 +853,11 @@ internal class SimpleLiveRecordManager2
             var list = streamSpec.Playlist!.MediaParts[0].MediaSegments.Skip(index + 1).ToList();
             if (list.Count > 0)
             {
+                if (usePredictableUrlPattern)
+                {
+                    list = ApplyPredictableSegmentUrlPattern(list, task, lastUrlNumber, SegmentGapSource.CurrentPlaylist) ?? list;
+                }
+
                 var newMin = list.Min(s => s.Index);
                 var oldMax = MaxIndexDic[task.Id];
                 if (newMin < oldMax)
@@ -865,150 +890,242 @@ internal class SimpleLiveRecordManager2
     /// <summary>
     /// 尝试基于可预测的文件名规律补齐 playlist 中间缺失的 segment
     /// 触发条件（全部满足）：
-    ///   1. 新 playlist 至少有 2 个 segment
-    ///   2. 新 playlist 所有 segment 的 Index 严格连续（差值 1）
-    ///   3. 首次 media playlist 时所有 segment 的 URL query string 相同
-    ///   4. 新 playlist 所有 segment 的 URL 文件名（去除扩展名）是纯数字且与 Index 相等
-    ///   5. 所有 segment 加密方式相同
-    ///   6. 上次记录的 LastFileName 也是纯数字且与 MaxIndexDic 一致
-    ///   7. 新 playlist 首个 segment 的 Index 严格大于 MaxIndexDic + 1（存在间隙）
-    ///   8. 缺失数量不超过上限（防止过度补齐）
+    ///   1. 新 playlist 至少有 1 个 segment
+    ///   2. 首次 media playlist 时所有 segment 的 URL query string 相同，且文件名是与 Index 相等的纯数字
+    ///   3. 新 playlist 所有 segment 的 URL query string 相同，文件名是严格递增的纯数字
+    ///   4. 上次记录的 LastFileName 也是纯数字且与 MaxIndexDic 一致
+    ///   5. 缺失数量不超过上限（防止过度补齐）
     /// </summary>
     private void TryFillMissingSegments(StreamSpec streamSpec, ProgressTask task)
     {
         var newSegments = streamSpec.Playlist!.MediaParts[0].MediaSegments;
-        if (newSegments.Count < 2) return;
+        if (newSegments.Count < 1) return;
 
         var oldMax = MaxIndexDic[task.Id];
-        var firstNew = newSegments[0];
-        var firstNewIndex = firstNew.Index;
-
-        // 必须存在间隙
-        if (firstNewIndex <= oldMax + 1) return;
 
         // 校验 LastFileName 也是纯数字且与 oldMax 一致
         if (!long.TryParse(LastFileNameDic[task.Id], out var lastNumber) || lastNumber != oldMax)
             return;
 
-        // query 一致性在首次 media playlist 时已判定，此处不再重复
-        if (!SameQueryDic.GetValueOrDefault(task.Id))
+        var filledSegments = ApplyPredictableSegmentUrlPattern(newSegments, task, lastNumber, SegmentGapSource.BetweenPlaylistRefreshes);
+        if (filledSegments == null)
             return;
 
-        // 验证所有 segment 都符合"连续数字命名"模式
-        var encryptMethod = firstNew.EncryptInfo.Method;
-        for (var i = 0; i < newSegments.Count; i++)
+        streamSpec.Playlist!.MediaParts[0].MediaSegments = filledSegments;
+    }
+
+    private bool TryGetPredictableSegmentUrlPattern(ProgressTask task, out SegmentUrlPatternCheck pattern)
+    {
+        return SegmentUrlPatternDic.TryGetValue(task.Id, out pattern)
+            && pattern.SameQuery
+            && pattern.NumericFileNameMatchesIndex;
+    }
+
+    private static int FindSegmentIndexByUrlNumber(IReadOnlyList<MediaSegment> segments, long number)
+    {
+        for (var i = 0; i < segments.Count; i++)
         {
-            var seg = newSegments[i];
-            if (i > 0 && seg.Index != newSegments[i - 1].Index + 1) return;
-            if (seg.EncryptInfo.Method != encryptMethod) return;
-            var fileNameNoExt = GetUrlFileNameWithoutExtension(seg.Url);
-            if (!long.TryParse(fileNameNoExt, out var num) || num != seg.Index) return;
+            var urlParts = ParseSegmentUrl(segments[i].Url);
+            if (long.TryParse(urlParts.FileNameWithoutExtension, out var segmentNumber) && segmentNumber == number)
+                return i;
         }
 
-        var missingCount = firstNewIndex - oldMax - 1;
+        return -1;
+    }
+
+    private List<MediaSegment>? ApplyPredictableSegmentUrlPattern(
+        IReadOnlyList<MediaSegment> segments,
+        ProgressTask task,
+        long previousNumber,
+        SegmentGapSource firstGapSource)
+    {
+        if (segments.Count == 0)
+            return [];
+
+        if (!TryGetPredictableSegmentUrlPattern(task, out _))
+            return null;
+
+        var segmentInfos = new List<(MediaSegment Segment, SegmentUrlParts UrlParts, long Number)>(segments.Count);
+        long? lastNumber = null;
+        string? query = null;
+        var missingCount = 0L;
+        var missingRanges = new List<MissingSegmentRange>();
+
+        foreach (var segment in segments)
+        {
+            var urlParts = ParseSegmentUrl(segment.Url);
+            if (!long.TryParse(urlParts.FileNameWithoutExtension, out var number))
+                return null;
+
+            query ??= urlParts.Query;
+            if (urlParts.Query != query)
+                return null;
+
+            if (lastNumber != null && number <= lastNumber.Value)
+                return null;
+
+            var previous = lastNumber ?? previousNumber;
+            if (number <= previous)
+                return null;
+
+            var currentMissingCount = number - previous - 1;
+            if (currentMissingCount > 0)
+            {
+                var source = lastNumber == null ? firstGapSource : SegmentGapSource.CurrentPlaylist;
+                missingRanges.Add(new MissingSegmentRange(previous + 1, number - 1, source));
+                missingCount += currentMissingCount;
+            }
+
+            lastNumber = number;
+            segmentInfos.Add((segment, urlParts, number));
+        }
+
+        var shouldFill = missingCount > 0;
         var maxFill = DownloaderConfig.MyOptions.LiveFillSegmentsGapMax!.Value;
         if (missingCount > maxFill)
         {
-            Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segments which exceeds max fill limit ({maxFill}). Skipping fill.[/]");
-            return;
+            Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segment(s) in predictable URL pattern ({FormatMissingSegmentRanges(missingRanges)}), which exceeds max fill limit ({maxFill}). Skipping fill.[/]");
+            shouldFill = false;
         }
 
-        // 以首个新 segment 为模板克隆缺失片段
-        var template = firstNew;
-        var fileExt = GetUrlFileExtension(template.Url);
-        var fillList = new List<MediaSegment>((int)missingCount);
-        for (var idx = oldMax + 1; idx < firstNewIndex; idx++)
-        {
-            var newUrl = ReplaceUrlFileName(template.Url, idx.ToString(), fileExt);
-            if (newUrl == null) return;
+        var result = new List<MediaSegment>(segments.Count + (shouldFill ? (int)missingCount : 0));
+        long prevNumber = previousNumber;
+        long? firstFilled = null;
+        long? lastFilled = null;
 
-            var seg = new MediaSegment
+        foreach (var (segment, urlParts, number) in segmentInfos)
+        {
+            if (shouldFill)
             {
-                Index = idx,
-                Duration = template.Duration,
-                Title = template.Title,
-                DateTime = template.DateTime?.AddSeconds(-(firstNewIndex - idx) * template.Duration),
-                StartRange = template.StartRange,
-                ExpectLength = template.ExpectLength,
-                Url = newUrl,
-                NameFromVar = null, // 强制按 URL 推导文件名
-                EncryptInfo = new EncryptInfo
+                for (var idx = prevNumber + 1; idx < number; idx++)
                 {
-                    Method = template.EncryptInfo.Method,
-                    Key = template.EncryptInfo.Key,
-                    IV = template.EncryptInfo.IV != null ? (byte[])template.EncryptInfo.IV.Clone() : null,
-                },
-            };
-            fillList.Add(seg);
+                    var filledSegment = CreateFilledSegment(segment, urlParts, idx, number);
+                    if (filledSegment == null)
+                        return null;
+
+                    firstFilled ??= idx;
+                    lastFilled = idx;
+                    result.Add(filledSegment);
+                }
+            }
+
+            segment.Index = number;
+            result.Add(segment);
+            prevNumber = number;
         }
 
-        if (fillList.Count == 0) return;
-
-        Logger.WarnMarkUp($"[darkorange3_1]Detected {fillList.Count} missing segment(s), filling: {fillList[0].Index} ~ {fillList[^1].Index}[/]");
-        streamSpec.Playlist!.MediaParts[0].MediaSegments = fillList.Concat(newSegments).ToList();
-    }
-
-    /// <summary>
-    /// 判断 playlist 中所有 segment 的 URL query string 是否相同
-    /// </summary>
-    private static bool CheckAllSegmentsSameQuery(IReadOnlyList<MediaSegment> segments)
-    {
-        if (segments.Count < 2) return true;
-
-        var firstQuery = GetUrlQuery(segments[0].Url);
-        for (var i = 1; i < segments.Count; i++)
+        if (firstFilled != null && lastFilled != null)
         {
-            if (GetUrlQuery(segments[i].Url) != firstQuery)
-                return false;
+            Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segment(s) in predictable URL pattern ({FormatMissingSegmentRanges(missingRanges)}), filling.[/]");
         }
-        return true;
+
+        return result;
+    }
+
+    private static string FormatMissingSegmentRanges(IReadOnlyList<MissingSegmentRange> ranges)
+    {
+        if (ranges.Count == 0)
+            return "none";
+
+        var betweenPlaylistRanges = ranges.Where(r => r.Source == SegmentGapSource.BetweenPlaylistRefreshes).ToList();
+        var currentPlaylistRanges = ranges.Where(r => r.Source == SegmentGapSource.CurrentPlaylist).ToList();
+        var parts = new List<string>(2);
+
+        if (betweenPlaylistRanges.Count > 0)
+            parts.Add($"between playlist refreshes: {FormatSegmentRanges(betweenPlaylistRanges)}");
+
+        if (currentPlaylistRanges.Count > 0)
+            parts.Add($"inside current media playlist: {FormatSegmentRanges(currentPlaylistRanges)}");
+
+        return string.Join("; ", parts);
+    }
+
+    private static string FormatSegmentRanges(IEnumerable<MissingSegmentRange> ranges)
+    {
+        return string.Join(", ", ranges.Select(r => r.Start == r.End ? r.Start.ToString() : $"{r.Start} ~ {r.End}"));
+    }
+
+    private static MediaSegment? CreateFilledSegment(MediaSegment template, SegmentUrlParts templateUrlParts, long index, long templateNumber)
+    {
+        var newUrl = ReplaceUrlFileName(templateUrlParts, index.ToString());
+        if (newUrl == null) return null;
+
+        return new MediaSegment
+        {
+            Index = index,
+            Duration = template.Duration,
+            Title = template.Title,
+            DateTime = template.DateTime?.AddSeconds(-(templateNumber - index) * template.Duration),
+            StartRange = template.StartRange,
+            ExpectLength = template.ExpectLength,
+            Url = newUrl,
+            NameFromVar = null, // 强制按 URL 推导文件名
+            EncryptInfo = new EncryptInfo
+            {
+                Method = template.EncryptInfo.Method,
+                Key = template.EncryptInfo.Key,
+                IV = template.EncryptInfo.IV != null ? (byte[])template.EncryptInfo.IV.Clone() : null,
+            },
+        };
     }
 
     /// <summary>
-    /// 从 URL 中取 query string（含前导 ?，无 query 时返回空字符串）
+    /// 检查首次 playlist 的 segment URL 是否具备可补片的基础规律
     /// </summary>
-    private static string GetUrlQuery(string url)
+    private static SegmentUrlPatternCheck CheckSegmentUrlPattern(IReadOnlyList<MediaSegment> segments)
+    {
+        if (segments.Count == 0)
+            return new SegmentUrlPatternCheck(SameQuery: true, NumericFileNameMatchesIndex: false);
+
+        var firstParts = ParseSegmentUrl(segments[0].Url);
+        var sameQuery = true;
+        var numericFileNameMatchesIndex = true;
+
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var segment = segments[i];
+            var urlParts = i == 0 ? firstParts : ParseSegmentUrl(segment.Url);
+
+            if (urlParts.Query != firstParts.Query)
+                sameQuery = false;
+
+            if (!long.TryParse(urlParts.FileNameWithoutExtension, out var num) || num != segment.Index)
+                numericFileNameMatchesIndex = false;
+
+            if (!sameQuery && !numericFileNameMatchesIndex)
+                break;
+        }
+
+        return new SegmentUrlPatternCheck(sameQuery, numericFileNameMatchesIndex);
+    }
+
+    /// <summary>
+    /// 解析 segment URL 的 path、query、文件名与扩展名
+    /// </summary>
+    private static SegmentUrlParts ParseSegmentUrl(string url)
     {
         var questionIdx = url.IndexOf('?');
-        return questionIdx >= 0 ? url[questionIdx..] : string.Empty;
-    }
-
-    /// <summary>
-    /// 从 URL 中取最后一段文件名（去除扩展名与 query）
-    /// </summary>
-    private static string GetUrlFileNameWithoutExtension(string url)
-    {
-        var path = url.Split('?')[0];
+        var path = questionIdx >= 0 ? url[..questionIdx] : url;
+        var query = questionIdx >= 0 ? url[questionIdx..] : string.Empty;
         var slash = path.LastIndexOf('/');
         var name = slash >= 0 ? path[(slash + 1)..] : path;
         var dot = name.LastIndexOf('.');
-        return dot >= 0 ? name[..dot] : name;
-    }
+        var fileNameWithoutExtension = dot >= 0 ? name[..dot] : name;
+        var extension = dot >= 0 ? name[dot..] : string.Empty;
 
-    /// <summary>
-    /// 从 URL 中取文件扩展名（含点号，无扩展名时返回空字符串）
-    /// </summary>
-    private static string GetUrlFileExtension(string url)
-    {
-        var path = url.Split('?')[0];
-        var slash = path.LastIndexOf('/');
-        var name = slash >= 0 ? path[(slash + 1)..] : path;
-        var dot = name.LastIndexOf('.');
-        return dot >= 0 ? name[dot..] : string.Empty;
+        return new SegmentUrlParts(path, query, fileNameWithoutExtension, extension);
     }
 
     /// <summary>
     /// 将 URL 中文件名部分替换为新文件名，保留 query string
     /// </summary>
-    private static string? ReplaceUrlFileName(string url, string newFileNameNoExt, string ext)
+    private static string? ReplaceUrlFileName(SegmentUrlParts urlParts, string newFileNameNoExt)
     {
-        var questionIdx = url.IndexOf('?');
-        var path = questionIdx >= 0 ? url[..questionIdx] : url;
-        var query = questionIdx >= 0 ? url[questionIdx..] : string.Empty;
+        var path = urlParts.Path;
         var lastSlash = path.LastIndexOf('/');
         if (lastSlash < 0) return null;
 
-        return path[..(lastSlash + 1)] + newFileNameNoExt + ext + query;
+        return path[..(lastSlash + 1)] + newFileNameNoExt + urlParts.Extension + urlParts.Query;
     }
 
     public async Task<bool> StartRecordAsync()
@@ -1093,7 +1210,7 @@ internal class SimpleLiveRecordManager2
                 RecordedDurDic[task.Id] = 0;
                 RefreshedDurDic[task.Id] = 0;
                 MaxIndexDic[task.Id] = item.Playlist?.MediaParts[0].MediaSegments.LastOrDefault()?.Index ?? 0L; // 最大Index
-                SameQueryDic[task.Id] = CheckAllSegmentsSameQuery(item.Playlist?.MediaParts[0].MediaSegments ?? []);
+                SegmentUrlPatternDic[task.Id] = CheckSegmentUrlPattern(item.Playlist?.MediaParts[0].MediaSegments ?? []);
                 BlockDic[task.Id] = new BufferBlock<List<MediaSegment>>();
                 return (item, task);
             }).ToDictionary(item => item.item, item => item.task);
