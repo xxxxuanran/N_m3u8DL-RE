@@ -34,8 +34,8 @@ internal class SimpleLiveRecordManager2
     bool STOP_FLAG = false;
     int WAIT_SEC = 0; // 基础刷新间隔（正常轮询）
     bool WAIT_FROM_TARGET_DURATION = false; // 基础间隔是否来自 #EXT-X-TARGETDURATION（决定是否启用降级轮询）
-    ConcurrentDictionary<int, int> RecordedDurDic = new(); // 已录制时长
-    ConcurrentDictionary<int, int> RefreshedDurDic = new(); // 已刷新出的时长
+    ConcurrentDictionary<int, double> RecordedDurDic = new(); // 已录制时长（保留小数，渲染时再取整）
+    ConcurrentDictionary<int, double> RefreshedDurDic = new(); // 已刷新出的时长（保留小数，渲染时再取整）
     ConcurrentDictionary<int, BufferBlock<List<MediaSegment>>> BlockDic = new(); // 各流的Block
     ConcurrentDictionary<int, bool> SamePathDic = new(); // 各流是否allSamePath
     ConcurrentDictionary<int, SegmentUrlPatternCheck> SegmentUrlPatternDic = new(); // 各已选 media playlist 的首次 segment URL 规律预检结果
@@ -489,7 +489,7 @@ internal class SimpleLiveRecordManager2
                     // 手动计算MPEGTS
                     if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
                     {
-                        vtt.MpegtsTimestamp = 90000 * (long)keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration);
+                        vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
                     }
                     if (firstSub) { currentVtt = vtt; firstSub = false; }
                     else currentVtt.AddCuesFromOne(vtt);
@@ -537,7 +537,7 @@ internal class SimpleLiveRecordManager2
                         // 手动计算MPEGTS
                         if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
                         {
-                            vtt.MpegtsTimestamp = 90000 * (long)keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration);
+                            vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
                         }
                         if (first) { currentVtt = vtt; first = false; }
                         else currentVtt.AddCuesFromOne(vtt);
@@ -552,7 +552,7 @@ internal class SimpleLiveRecordManager2
                         // 手动计算MPEGTS
                         if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
                         {
-                            vtt.MpegtsTimestamp = 90000 * (RecordedDurDic[task.Id] + (long)keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
+                            vtt.MpegtsTimestamp = (long)(90000 * (RecordedDurDic[task.Id] + keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration)));
                         }
                         currentVtt.AddCuesFromOne(vtt);
                     }
@@ -582,7 +582,7 @@ internal class SimpleLiveRecordManager2
                         // 手动计算MPEGTS
                         if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
                         {
-                            vtt.MpegtsTimestamp = 90000 * (long)keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration);
+                            vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
                         }
                         if (first) { currentVtt = vtt; first = false; }
                         else currentVtt.AddCuesFromOne(vtt);
@@ -597,14 +597,14 @@ internal class SimpleLiveRecordManager2
                         // 手动计算MPEGTS
                         if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
                         {
-                            vtt.MpegtsTimestamp = 90000 * (RecordedDurDic[task.Id] + (long)keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
+                            vtt.MpegtsTimestamp = (long)(90000 * (RecordedDurDic[task.Id] + keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration)));
                         }
                         currentVtt.AddCuesFromOne(vtt);
                     }
                 }
             }
 
-            RecordedDurDic[task.Id] += (int)segmentsDuration;
+            RecordedDurDic[task.Id] += segmentsDuration;
 
             /*// 写出m3u8
             if (DownloaderConfig.MyOptions.LiveWriteHLS)
@@ -829,7 +829,7 @@ internal class SimpleLiveRecordManager2
                     var dt = newList.Last().DateTime;
                     DateTimeDic[task.Id] = dt != null ? GetUnixTimestamp(dt.Value) : 0L;
                     // 累加已获取到的时长
-                    RefreshedDurDic[task.Id] += (int)newList.Sum(s => s.Duration);
+                    RefreshedDurDic[task.Id] += newList.Sum(s => s.Duration);
                 }
 
                 if (!STOP_FLAG && RefreshedDurDic[task.Id] >= DownloaderConfig.MyOptions.LiveRecordLimit?.TotalSeconds)
@@ -1293,7 +1293,7 @@ internal class SimpleLiveRecordManager2
                         task.MaxValue += 1;
                     }
                     task.Increment(1);
-                    RefreshedDurDic.AddOrUpdate(task.Id, (int)segment.Duration, (_, old) => old + (int)segment.Duration);
+                    RefreshedDurDic.AddOrUpdate(task.Id, segment.Duration, (_, old) => old + segment.Duration);
                     nextNumberToCommit--;
                 }
 
