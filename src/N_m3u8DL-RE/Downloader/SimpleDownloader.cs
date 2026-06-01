@@ -21,10 +21,10 @@ internal class SimpleDownloader : IDownloader
         DownloaderConfig = config;
     }
 
-    public async Task<DownloadResult?> DownloadSegmentAsync(MediaSegment segment, string savePath, SpeedContainer speedContainer, Dictionary<string, string>? headers = null, int? retryCount = null, CancellationToken cancellationToken = default)
+    public async Task<DownloadResult?> DownloadSegmentAsync(MediaSegment segment, string savePath, SpeedContainer speedContainer, Dictionary<string, string>? headers = null, int? retryCount = null, CancellationToken cancellationToken = default, string[]? hostMirrorsOverride = null)
     {
         var url = segment.Url;
-        var (des, dResult) = await DownClipAsync(url, savePath, speedContainer, segment.StartRange, segment.StopRange, headers, retryCount ?? DownloaderConfig.MyOptions.DownloadRetryCount, cancellationToken);
+        var (des, dResult) = await DownClipAsync(url, savePath, speedContainer, segment.StartRange, segment.StopRange, headers, retryCount ?? DownloaderConfig.MyOptions.DownloadRetryCount, cancellationToken, hostMirrorsOverride);
         if (dResult is { Success: true } && dResult.ActualFilePath != des)
         {
             switch (segment.EncryptInfo.Method)
@@ -133,8 +133,10 @@ internal class SimpleDownloader : IDownloader
     {
         if (candidates.Count == 1)
         {
-            return await DownloadUtil.DownloadToFileAsync(
+            var single = await DownloadUtil.DownloadToFileAsync(
                 candidates[0], path, speedContainer, parentCts, headers, fromPosition, toPosition);
+            single.RequestUrl = candidates[0];
+            return single;
         }
 
         var entries = new List<(Task<DownloadResult> Task, string TmpPath, CancellationTokenSource Cts, string CandidateUrl)>();
@@ -182,6 +184,8 @@ internal class SimpleDownloader : IDownloader
             throw lastException ?? new InvalidOperationException("All host mirrors failed");
         }
 
+        winnerResult.RequestUrl = entries.First(e => e.TmpPath == winnerTmp).CandidateUrl;
+
         if (!string.Equals(winnerTmp, path, StringComparison.OrdinalIgnoreCase))
         {
             if (File.Exists(path))
@@ -228,7 +232,7 @@ internal class SimpleDownloader : IDownloader
         }
     }
 
-    private async Task<(string des, DownloadResult? dResult)> DownClipAsync(string url, string path, SpeedContainer speedContainer, long? fromPosition, long? toPosition, Dictionary<string, string>? headers = null, int retryCount = 3, CancellationToken cancellationToken = default)
+    private async Task<(string des, DownloadResult? dResult)> DownClipAsync(string url, string path, SpeedContainer speedContainer, long? fromPosition, long? toPosition, Dictionary<string, string>? headers = null, int retryCount = 3, CancellationToken cancellationToken = default, string[]? hostMirrorsOverride = null)
     {
         CancellationTokenSource? cancellationTokenSource = null;
         retry:
@@ -270,8 +274,9 @@ internal class SimpleDownloader : IDownloader
                 }
             });
 
-            // 调用下载（可选多 host 竞速）
-            var candidates = BuildCandidateUrls(url, DownloaderConfig.MyOptions.LiveHostMirrors);
+            // 调用下载（可选多 host 竞速）。hostMirrorsOverride 非 null 时按调用覆盖镜像列表：
+            // 传空数组即只用原始 URL（单 host、不竞速），用于 live-from-start 回填锁定到探测胜出的 host。
+            var candidates = BuildCandidateUrls(url, hostMirrorsOverride ?? DownloaderConfig.MyOptions.LiveHostMirrors);
             var result = await DownloadFirstSuccessfulHostAsync(
                 candidates, path, speedContainer, cancellationTokenSource, headers, fromPosition, toPosition);
             return (des, result);

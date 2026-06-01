@@ -67,7 +67,22 @@ internal class SimpleLiveRecordManager2
     private readonly record struct MissingSegmentRange(long Start, long End, SegmentGapSource Source);
     private readonly record struct RawM3u8SegmentBlock(string Id, string[] Lines);
     private readonly record struct RawM3u8ParseResult(List<RawM3u8SegmentBlock> Segments, bool HasEndList);
-    private readonly record struct LiveFromStartDiscardStats(int Count, MediaSegment? EarliestSuccessfulSegment);
+    // Live from start 回溯下载的不变上下文（模板分片、命名规律、临时目录、并发等），
+    // 在定界探测与升序回填之间共享，避免重复传一长串参数。
+    private sealed record LiveFromStartContext(
+        MediaSegment Template,
+        SegmentUrlParts TemplateUrlParts,
+        long TemplateNumber,
+        double SegmentDuration,
+        bool AllHasDatetime,
+        bool AllSamePath,
+        string TmpDir,
+        string Extension,
+        SpeedContainer SpeedContainer,
+        Dictionary<string, string> Headers,
+        int ProbeRetryCount,
+        // 定界/探测阶段使用的镜像列表（多镜像时收敛为前半部分）；null 表示沿用全局默认。
+        string[]? ProbeHostMirrors);
 
     public SimpleLiveRecordManager2(DownloaderConfig downloaderConfig, List<StreamSpec> selectedSteams, StreamExtractor streamExtractor)
     {
@@ -1219,6 +1234,7 @@ internal class SimpleLiveRecordManager2
         ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
         BufferBlock<List<MediaSegment>> source)
     {
+        using var backfillCts = new CancellationTokenSource();
         try
         {
             var segments = streamSpec.Playlist?.MediaParts[0].MediaSegments.ToList();
@@ -1243,122 +1259,310 @@ internal class SimpleLiveRecordManager2
             var backfillSegmentDuration = streamSpec.Playlist?.TargetDuration is > 0
                 ? streamSpec.Playlist.TargetDuration.Value
                 : firstSegment.Duration;
-            var maxParallel = Math.Max(1, DownloaderConfig.MyOptions.ThreadCount);
-            var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>>();
-            var completed = new Dictionary<long, (MediaSegment Segment, DownloadResult? Result)>();
-            var nextNumberToCreate = firstNumber - 1;
-            var nextNumberToCommit = firstNumber - 1;
-            var downloadedSegments = new List<MediaSegment>();
-            var startedDownloadsCount = 0;
-            var discardedAfterBoundaryCount = 0;
-            var discardedCleanupCount = 0;
-            MediaSegment? failedBoundarySegment = null;
-            MediaSegment? earliestAvailableSegment = null;
-            var stopCreatingDownloads = false;
-            long? highestUnavailableNumber = null;
-            using var backfillCts = new CancellationTokenSource();
+            if (backfillSegmentDuration <= 0)
+                backfillSegmentDuration = 1;
 
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: downloading earlier segments before {firstNumber} for {streamLabel}.[/]");
+            var threadCount = Math.Max(1, DownloaderConfig.MyOptions.ThreadCount);
+            // 增强①（更高吞吐）：回填进行时主轮询基本只在累积、几乎不占带宽预算，
+            // 因此让回填使用比 ThreadCount 更高的并发（翻倍，封顶 32），把空闲预算
+            // 全部用来抢救临近过期的早期分片。R 越大，下方的过期跳过就越少。
+            var backfillParallel = Math.Clamp(threadCount * 2, threadCount, 32);
 
-            while (!STOP_FLAG && ((!stopCreatingDownloads && nextNumberToCreate >= 0) || inFlight.Count > 0 || completed.Count > 0))
+            // 增强③（多镜像分流，精细化）：
+            // - 定界/探测阶段：镜像数 > 1 时收敛为"按顺序的前半部分"，避免对数次探测对全部镜像逐一施压；
+            // - 并发回填阶段：锁定到探测中胜出的那个 host 单点下载，不再多 host 竞速（见下方 pinnedAuthority）。
+            var effectiveMirrors = DownloaderConfig.MyOptions.LiveHostMirrors?
+                .Where(m => !string.IsNullOrWhiteSpace(m)).ToArray() ?? [];
+            var hasMirrors = effectiveMirrors.Length > 0;
+            // 探测用镜像取前半部分（向下取整），但至少保留 1 个：1→1、2→1、3→1、4→2 ...
+            var probeHostMirrors = hasMirrors
+                ? effectiveMirrors.Take(Math.Max(1, effectiveMirrors.Length / 2)).ToArray()
+                : null;
+
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: probeHostMirrors -> {string.Join(", ", probeHostMirrors?.Select(m => m.EscapeMarkup()) ?? [])}.[/]");
+
+            var ctx = new LiveFromStartContext(
+                Template: firstSegment,
+                TemplateUrlParts: firstUrlParts,
+                TemplateNumber: firstNumber,
+                SegmentDuration: backfillSegmentDuration,
+                AllHasDatetime: allHasDatetime,
+                AllSamePath: allSamePath,
+                TmpDir: tmpDir,
+                Extension: streamSpec.Extension ?? "clip",
+                SpeedContainer: speedContainer,
+                Headers: headers,
+                // 探测重试：候选总 host > 1（含原始URL + 前半镜像）时单 host 偶发失败由竞速兜底，
+                // 且边界点是"全网不可用"，无需逐 host 重试（重试的 1000ms 延迟是探测主要耗时点），故置 0；
+                // 单 host 时才保留 1 次，避免把瞬时抖动误判成可用边界。
+                ProbeRetryCount: hasMirrors ? 0 : 1,
+                ProbeHostMirrors: probeHostMirrors);
+
+            // 增强②（缓存复用）：探测阶段命中过的 number 进缓存，回填阶段直接复用其已下载文件，绝不重复请求。
+            // 增强③（多镜像分流）：所有探测与回填下载都经由 Downloader.DownloadSegmentAsync，
+            // 已内置 LiveHostMirrors 的多 host 竞速，天然把探测/回填压力分散到镜像。
+            var downloadCache = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
+
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: locating earliest available segment before {firstNumber} for {streamLabel}.[/]");
+
+            // ===== 阶段 1：指数探测 + 二分，对数次请求内定位最早可用边界 E0 =====
+            var (earliestNumber, winningUrl, useDescending) = await LocateEarliestAvailableLiveFromStartNumberAsync(ctx, firstNumber, 0, downloadCache, backfillCts.Token);
+
+            var upper = firstNumber - 1;
+
+            // 边界情况：可用区很浅 -> 倒序下载方案（从 S-1 并发向下全量竞速、遇首个确认不可得即停、保留连续段接边）。
+            // 倒序不锁定 host，故此处无需计算/锁定 pinned host。
+            if (useDescending)
             {
-                var stopBacktracking = false;
-                while (completed.TryGetValue(nextNumberToCommit, out var completedDownload))
+                await BackfillDescendingAsync(ctx, task, streamLabel, upper, 0, fileDic, downloadCache, backfillCts);
+                return;
+            }
+
+            if (earliestNumber == null)
+            {
+                Logger.InfoMarkUp($"[darkorange3_1]Live from start: no earlier segment available before {firstNumber} for {streamLabel}.[/]");
+                return;
+            }
+
+            // 仅在确实启用了镜像时才锁定 host（升序回填用）；否则保持默认（本就单 host）。
+            var pinnedAuthority = hasMirrors ? TryParseUrlAuthority(winningUrl) : null;
+            if (pinnedAuthority != null)
+                Logger.InfoMarkUp($"[darkorange3_1]Live from start: pinning backfill host to [cyan]{pinnedAuthority.Host.EscapeMarkup()}[/] for {streamLabel} (no multi-host racing).[/]");
+
+            var boundaryNumber = earliestNumber.Value - 1;
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: earliest available segment is {earliestNumber.Value} for {streamLabel}; backfilling ascending {earliestNumber.Value} ~ {upper}.[/]");
+
+            // ===== 阶段 2：从 E0 升序高并发回填，跑在过期边界前面 =====
+            // 关键：始终优先派发"当前最旧"未下载分片；只要下载快于实时（R·segDur>1），
+            // 升序前沿恒高于回退的过期边界，理论零丢失。若某段确已过期则按需跳过（reactive，无需预测安全余量）。
+            // 参差区快速跳过：DVR 最旧端常是参差不齐的（老片正被轮转删除），连续多个空洞即典型特征。
+            // 进入该区后只做锁定 host 单点下载、不触发昂贵的全量镜像兜底竞速；离开（连续成功若干）后恢复。
+            // 由于派发有前瞻（领先提交），快速跳过模式可能把少量"干净区首片"也按单 host 处理而误判为空洞，
+            // 故收尾时对"边界处未做兜底的可疑空洞"再统一复核（见下），保证不会误截断干净连续段。
+            var raggedEnterFailures = Math.Max(3, threadCount / 3); // 连续失败达到此数 -> 进入快速跳过
+            var raggedExitSuccesses = backfillParallel;             // 连续成功达到此数 -> 退出快速跳过
+            var consecutiveFailures = 0;
+            var consecutiveSuccesses = 0;
+            var raggedFastSkip = false;
+
+            var nextDispatch = earliestNumber.Value;
+            var nextCommit = earliestNumber.Value;
+            var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result, bool Recovered, bool FallbackAttempted)>>();
+            var resolved = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result, bool FallbackAttempted)>();
+            var downloadedSegments = new List<MediaSegment>();
+            var committed = new HashSet<long>();
+            var discardedExpiredNumbers = new List<long>();
+            var tentativeGaps = new HashSet<long>(); // 仅快速跳过、未做兜底竞速的可疑空洞
+            var dispatchCount = 0;
+            var discardedCleanupCount = 0;
+            var recoveredByFallbackCount = 0;
+
+            while (!STOP_FLAG && !backfillCts.IsCancellationRequested && nextCommit <= upper)
+            {
+                // 升序派发
+                while (inFlight.Count < backfillParallel && nextDispatch <= upper
+                       && !STOP_FLAG && !backfillCts.IsCancellationRequested)
                 {
-                    completed.Remove(nextNumberToCommit);
-                    var (segment, result) = completedDownload;
-
-                    if (result is not { Success: true })
+                    var number = nextDispatch;
+                    if (downloadCache.TryGetValue(number, out var cached))
                     {
-                        failedBoundarySegment = segment;
-                        highestUnavailableNumber = nextNumberToCommit;
-                        Logger.InfoMarkUp($"[darkorange3_1]Live from start stopped before {OtherUtil.GetFileNameFromInput(segment.Url, false).EscapeMarkup()}: segment is unavailable.[/]");
-                        backfillCts.Cancel();
-                        var completedDiscardStats = DiscardUnusedLiveFromStartDownloads(completed.Values);
-                        var inFlightDiscardStats = await DiscardUnusedLiveFromStartDownloadsAsync(inFlight.Values);
-                        discardedAfterBoundaryCount += completedDiscardStats.Count + inFlightDiscardStats.Count;
-                        earliestAvailableSegment = GetEarlierLiveFromStartSegment(earliestAvailableSegment, completedDiscardStats.EarliestSuccessfulSegment);
-                        earliestAvailableSegment = GetEarlierLiveFromStartSegment(earliestAvailableSegment, inFlightDiscardStats.EarliestSuccessfulSegment);
-                        completed.Clear();
-                        inFlight.Clear();
-                        stopBacktracking = true;
-                        break;
+                        // 探测缓存命中：探测本身是多 host 竞速，结果视为已确认（FallbackAttempted=true）
+                        resolved[number] = (cached.Segment, cached.Result, true);
                     }
+                    else
+                    {
+                        inFlight[number] = CreateAndDownloadBackfillSegmentAsync(ctx, number, pinnedAuthority, backfillCts.Token, allowFallback: !raggedFastSkip);
+                        dispatchCount++;
+                    }
+                    nextDispatch++;
+                }
 
-                    fileDic[segment] = result;
-                    downloadedSegments.Add(segment);
-                    earliestAvailableSegment = GetEarlierLiveFromStartSegment(earliestAvailableSegment, segment);
+                // 升序提交，保证后续合并顺序
+                while (resolved.Remove(nextCommit, out var done))
+                {
+                    if (done.Result is { Success: true } && done.Segment != null)
+                    {
+                        var segment = done.Segment;
+                        fileDic[segment] = done.Result;
+                        downloadedSegments.Add(segment);
+                        committed.Add(nextCommit);
+                        lock (lockObj)
+                        {
+                            task.MaxValue += 1;
+                        }
+                        task.Increment(1);
+                        RefreshedDurDic.AddOrUpdate(task.Id, segment.Duration, (_, old) => old + segment.Duration);
+
+                        consecutiveFailures = 0;
+                        if (raggedFastSkip && ++consecutiveSuccesses >= raggedExitSuccesses)
+                        {
+                            raggedFastSkip = false;
+                            consecutiveSuccesses = 0;
+                            Logger.InfoMarkUp($"[darkorange3_1]Live from start: exiting ragged fast-skip at segment {nextCommit} for {streamLabel} after {raggedExitSuccesses} consecutive success(es) (threshold={raggedExitSuccesses}); mirror fallback re-enabled.[/]");
+                        }
+                    }
+                    else
+                    {
+                        // 该分片在锁定 host（及兜底竞速，若已做）下不可得——记录编号、跳过并清理
+                        discardedExpiredNumbers.Add(nextCommit);
+                        if (!done.FallbackAttempted)
+                            tentativeGaps.Add(nextCommit); // 仅快速跳过、未确认，收尾时复核
+                        TryDeleteDownloadResult(done.Result);
+
+                        consecutiveSuccesses = 0;
+                        if (++consecutiveFailures >= raggedEnterFailures)
+                        {
+                            if (!raggedFastSkip)
+                            {
+                                raggedFastSkip = true;
+                                Logger.InfoMarkUp($"[darkorange3_1]Live from start: entering ragged fast-skip at segment {nextCommit} for {streamLabel} after {consecutiveFailures} consecutive failure(s) (threshold={raggedEnterFailures}); single-host only, no mirror fallback.[/]");
+                            }
+                        }
+                    }
+                    nextCommit++;
+                }
+
+                if (nextCommit > upper)
+                    break;
+
+                if (inFlight.Count == 0)
+                {
+                    // 提交前沿暂未就绪且无在途任务：若已派发到顶则结束，否则继续派发
+                    if (nextDispatch > upper)
+                        break;
+                    continue;
+                }
+
+                var finished = await Task.WhenAny(inFlight.Values);
+                var finishedNumber = inFlight.First(kv => kv.Value == finished).Key;
+                inFlight.Remove(finishedNumber);
+                var finishedResult = await finished;
+                if (finishedResult.Recovered)
+                    recoveredByFallbackCount++;
+                resolved[finishedNumber] = (finishedResult.Segment, finishedResult.Result, finishedResult.FallbackAttempted);
+            }
+
+            // ===== 边界复核：参差区快速跳过可能把"干净连续段的首片"误判成空洞（pinned host 偶发缺片但其它镜像有）。
+            // 从最高空洞往下，对"未做兜底竞速的可疑空洞"补做一次全量竞速：能救回的说明是误判（恢复并采纳），
+            // 直到遇到第一个"确认不可补齐"的空洞为止——它才是真正的裁剪边界 G。 =====
+            while (!STOP_FLAG && discardedExpiredNumbers.Count > 0)
+            {
+                var topGap = discardedExpiredNumbers.Max();
+                if (!tentativeGaps.Contains(topGap))
+                    break; // 已确认不可补齐 -> 即真实边界
+
+                var verify = await CreateAndDownloadBackfillSegmentAsync(ctx, topGap, pinnedAuthority, backfillCts.Token, allowFallback: true);
+                tentativeGaps.Remove(topGap);
+                if (verify.Result is { Success: true } && verify.Segment != null)
+                {
+                    // 误判空洞：实为可用，恢复采纳
+                    discardedExpiredNumbers.Remove(topGap);
+                    fileDic[verify.Segment] = verify.Result;
+                    downloadedSegments.Add(verify.Segment);
+                    committed.Add(topGap);
                     lock (lockObj)
                     {
                         task.MaxValue += 1;
                     }
                     task.Increment(1);
-                    RefreshedDurDic.AddOrUpdate(task.Id, segment.Duration, (_, old) => old + segment.Duration);
-                    nextNumberToCommit--;
+                    RefreshedDurDic.AddOrUpdate(task.Id, verify.Segment.Duration, (_, old) => old + verify.Segment.Duration);
+                    recoveredByFallbackCount++;
                 }
-
-                if (stopBacktracking)
-                    break;
-
-                while (!STOP_FLAG && !stopCreatingDownloads && nextNumberToCreate >= 0 && inFlight.Count < maxParallel)
+                else
                 {
-                    var candidate = CreateFilledSegment(firstSegment, firstUrlParts, nextNumberToCreate, firstNumber, backfillSegmentDuration);
-                    if (candidate == null)
-                    {
-                        nextNumberToCreate = -1;
-                        break;
-                    }
-
-                    var filename = GetSegmentName(candidate, allHasDatetime, allSamePath);
-                    var path = Path.Combine(tmpDir, filename + $".{streamSpec.Extension ?? "clip"}.tmp");
-                    inFlight[nextNumberToCreate] = DownloadLiveFromStartSegmentAsync(candidate, path, speedContainer, headers, backfillCts.Token);
-                    startedDownloadsCount++;
-                    nextNumberToCreate--;
-                }
-
-                if (inFlight.Count == 0)
-                {
-                    var cleanupStats = DiscardUnusedLiveFromStartDownloads(completed.Values);
-                    discardedCleanupCount += cleanupStats.Count;
-                    earliestAvailableSegment = GetEarlierLiveFromStartSegment(earliestAvailableSegment, cleanupStats.EarliestSuccessfulSegment);
-                    completed.Clear();
-                    break;
-                }
-
-                var finishedTask = await Task.WhenAny(inFlight.Values);
-                var finishedNumber = inFlight.First(kv => kv.Value == finishedTask).Key;
-                inFlight.Remove(finishedNumber);
-                var finishedDownload = await finishedTask;
-                completed[finishedNumber] = finishedDownload;
-                if (finishedDownload.Result is not { Success: true })
-                {
-                    stopCreatingDownloads = true;
-                    if (highestUnavailableNumber == null || finishedNumber > highestUnavailableNumber.Value)
-                    {
-                        highestUnavailableNumber = finishedNumber;
-                        failedBoundarySegment = finishedDownload.Segment;
-                    }
+                    TryDeleteDownloadResult(verify.Result);
+                    break; // 确认不可补齐 -> 真实边界，停止复核
                 }
             }
 
+            // ===== 收尾：取消并清理未提交的下载文件 =====
             backfillCts.Cancel();
-            var remainingCompletedCleanupStats = DiscardUnusedLiveFromStartDownloads(completed.Values);
-            var remainingInFlightCleanupStats = await DiscardUnusedLiveFromStartDownloadsAsync(inFlight.Values);
-            discardedCleanupCount += remainingCompletedCleanupStats.Count + remainingInFlightCleanupStats.Count;
-            earliestAvailableSegment = GetEarlierLiveFromStartSegment(earliestAvailableSegment, remainingCompletedCleanupStats.EarliestSuccessfulSegment);
-            earliestAvailableSegment = GetEarlierLiveFromStartSegment(earliestAvailableSegment, remainingInFlightCleanupStats.EarliestSuccessfulSegment);
+            foreach (var kv in inFlight)
+            {
+                try
+                {
+                    var (_, result, _, _) = await kv.Value;
+                    if (result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(result))
+                        discardedCleanupCount++;
+                }
+                catch
+                {
+                    // 忽略已取消/失败的清理
+                }
+            }
+            foreach (var kv in resolved)
+            {
+                if (kv.Value.Result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(kv.Value.Result))
+                    discardedCleanupCount++;
+            }
+            foreach (var kv in downloadCache)
+            {
+                if (kv.Value.Result is { Success: true } && !committed.Contains(kv.Key)
+                    && !resolved.ContainsKey(kv.Key) && !inFlight.ContainsKey(kv.Key)
+                    && TryDeleteDownloadResult(kv.Value.Result))
+                {
+                    discardedCleanupCount++;
+                }
+            }
 
             downloadedSegments.Sort((left, right) => left.Index.CompareTo(right.Index));
-            var acceptedRange = downloadedSegments.Count > 0
-                ? FormatSegmentRanges([new MissingSegmentRange(downloadedSegments[0].Index, downloadedSegments[^1].Index, SegmentGapSource.CurrentPlaylist)])
+            discardedExpiredNumbers.Sort();
+
+            // ===== 关键：只保留"连接到直播边缘的连续段" =====
+            // DVR 窗口最旧端往往参差不齐（老片正被 CDN 逐步轮转删除），二分只能定位到"个体可用的最低片" E0，
+            // 它可能落在参差区底部，其上方仍存在无法补齐的空洞（全网 404）。这些空洞之下的碎片即使下到了，
+            // 也无法跨过空洞与直播边缘连续拼接，对输出毫无价值，反而会在合并产物里制造断点。
+            // 因此以"最高不可补齐空洞 G"为界：丢弃所有 index <= G 的已下载碎片，仅保留连续的 (G, upper]。
+            var abandonedFragmentCount = 0;
+            long? abandonedTailFloor = null;
+            long? abandonedTailCeil = null;
+            if (discardedExpiredNumbers.Count > 0 && downloadedSegments.Count > 0)
+            {
+                var highestGap = discardedExpiredNumbers[^1];
+                var fragments = downloadedSegments.Where(s => s.Index <= highestGap).ToList();
+                if (fragments.Count > 0)
+                {
+                    var rolledBackDuration = 0d;
+                    foreach (var seg in fragments)
+                    {
+                        if (fileDic.TryRemove(seg, out var res))
+                            TryDeleteDownloadResult(res);
+                        rolledBackDuration += seg.Duration;
+                    }
+                    // 回退进度条与已刷新时长（这些碎片不计入最终可用产物）
+                    lock (lockObj)
+                    {
+                        task.MaxValue -= fragments.Count;
+                    }
+                    task.Increment(-fragments.Count);
+                    RefreshedDurDic.AddOrUpdate(task.Id, -rolledBackDuration, (_, old) => old - rolledBackDuration);
+
+                    abandonedFragmentCount = fragments.Count;
+                    abandonedTailFloor = earliestNumber.Value;
+                    abandonedTailCeil = highestGap;
+                    downloadedSegments = downloadedSegments.Where(s => s.Index > highestGap).ToList();
+                }
+            }
+
+            // 裁剪后 downloadedSegments 即"连接到直播边缘的连续段"，accepted_range 现在应为单一连续区间。
+            var acceptedRange = FormatContiguousIndexRanges(downloadedSegments.Select(s => s.Index).ToList());
+            var earliestAvailable = downloadedSegments.Count > 0
+                ? FormatLiveFromStartSegmentLabel(downloadedSegments[0])
+                : earliestNumber.Value.ToString(CultureInfo.InvariantCulture);
+            var failedBoundary = boundaryNumber >= 0 ? boundaryNumber.ToString(CultureInfo.InvariantCulture) : "none";
+            var startedDownloads = downloadCache.Count + dispatchCount;
+            var abandonedTailRange = abandonedTailCeil != null
+                ? FormatSegmentRanges([new MissingSegmentRange(abandonedTailFloor!.Value, abandonedTailCeil.Value, SegmentGapSource.CurrentPlaylist)])
                 : "none";
-            var earliestAvailable = earliestAvailableSegment != null ? FormatLiveFromStartSegmentLabel(earliestAvailableSegment) : "none";
-            var failedBoundary = failedBoundarySegment != null ? FormatLiveFromStartSegmentLabel(failedBoundarySegment) : "none";
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start summary for {streamLabel}: accepted_total={downloadedSegments.Count}, discarded_after_boundary={discardedAfterBoundaryCount}, discarded_cleanup={discardedCleanupCount}, downloads_started={startedDownloadsCount}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}.[/]");
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start summary for {streamLabel}: accepted_total={downloadedSegments.Count}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}, boundary_probes={downloadCache.Count}, downloads_started={startedDownloads}, recovered_by_fallback={recoveredByFallbackCount}, abandoned_tail={abandonedTailRange}, abandoned_fragments={abandonedFragmentCount}, unfillable_gaps={discardedExpiredNumbers.Count}, discarded_cleanup={discardedCleanupCount}.[/]");
 
             if (downloadedSegments.Count > 0)
             {
-                Logger.InfoMarkUp($"[darkorange3_1]Live from start downloaded {downloadedSegments.Count} earlier segment(s) for {streamLabel}: {acceptedRange}.[/]");
+                Logger.InfoMarkUp($"[darkorange3_1]Live from start downloaded {downloadedSegments.Count} contiguous earlier segment(s) for {streamLabel}: {acceptedRange}.[/]");
+            }
+            if (abandonedTailCeil != null)
+            {
+                Logger.WarnMarkUp($"[darkorange3_1]Live from start: abandoned ragged DVR tail {abandonedTailRange} for {streamLabel} ({abandonedFragmentCount} downloaded fragment(s) discarded, {discardedExpiredNumbers.Count} segment(s) unavailable on all hosts) — cannot connect to live edge across unfillable gap(s).[/]");
             }
         }
         catch (Exception ex)
@@ -1372,16 +1576,437 @@ internal class SimpleLiveRecordManager2
         }
     }
 
+    /// <summary>
+    /// 边界情况的倒序回填方案（可用区很浅，如刚开播只缺开头一分钟以内的分片）。
+    /// 从 upper(=S-1) 并发向下下载，按降序提交，遇到第一个"全量竞速后仍不可得"的分片即停，
+    /// 保留 [boundary+1, upper] 这段连续片接到直播边缘。区间短、几乎不受过期影响，且天然连续、无需参差裁剪。
+    /// 与升序回填不同：倒序**不锁定 host、直接全量镜像竞速**（区间短，竞速代价可接受且更快更稳）；
+    /// 重试次数走 GetLiveFromStartDownloadRetryCount()（有镜像=0、无镜像=1）。
+    /// </summary>
+    private async Task BackfillDescendingAsync(
+        LiveFromStartContext ctx,
+        ProgressTask task,
+        string streamLabel,
+        long upper,
+        long floor,
+        ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
+        Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
+        CancellationTokenSource backfillCts)
+    {
+        var threadCount = Math.Max(1, DownloaderConfig.MyOptions.ThreadCount);
+        var backfillParallel = Math.Clamp(threadCount * 2, threadCount, 32);
+
+        var nextDispatch = upper;
+        var nextCommit = upper;
+        var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>>();
+        var resolved = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
+        var downloadedSegments = new List<MediaSegment>();
+        var committed = new HashSet<long>();
+        var dispatchCount = 0;
+        var reusedFromCache = 0;
+        var discardedCleanupCount = 0;
+        long? boundary = null; // 第一个确认不可得的编号（连续段下界 = boundary+1）
+        var stop = false;
+
+        Logger.InfoMarkUp($"[darkorange3_1]Live from start: descending backfill from {upper} downward for {streamLabel} (full-mirror race, stop at first unavailable).[/]");
+
+        while (!STOP_FLAG && !backfillCts.IsCancellationRequested && !stop && nextCommit >= floor)
+        {
+            // 降序派发（仅复用探测缓存里的"成功"结果；缓存里的失败需重新走全量竞速以确认边界）
+            while (inFlight.Count < backfillParallel && nextDispatch >= floor
+                   && !STOP_FLAG && !backfillCts.IsCancellationRequested)
+            {
+                var number = nextDispatch;
+                if (downloadCache.TryGetValue(number, out var cached) && cached.Result is { Success: true })
+                {
+                    resolved[number] = cached;
+                    reusedFromCache++;
+                }
+                else
+                {
+                    inFlight[number] = CreateAndDownloadFullRaceSegmentAsync(ctx, number, backfillCts.Token);
+                    dispatchCount++;
+                }
+                nextDispatch--;
+            }
+
+            // 降序提交，遇首个不可得即停
+            while (resolved.Remove(nextCommit, out var done))
+            {
+                if (done.Result is { Success: true } && done.Segment != null)
+                {
+                    var segment = done.Segment;
+                    fileDic[segment] = done.Result;
+                    downloadedSegments.Add(segment);
+                    committed.Add(nextCommit);
+                    lock (lockObj)
+                    {
+                        task.MaxValue += 1;
+                    }
+                    task.Increment(1);
+                    RefreshedDurDic.AddOrUpdate(task.Id, segment.Duration, (_, old) => old + segment.Duration);
+                    nextCommit--;
+                }
+                else
+                {
+                    boundary = nextCommit;
+                    TryDeleteDownloadResult(done.Result);
+                    stop = true;
+                    break;
+                }
+            }
+
+            if (stop || nextCommit < floor)
+                break;
+
+            if (inFlight.Count == 0)
+            {
+                if (nextDispatch < floor)
+                    break;
+                continue;
+            }
+
+            var finished = await Task.WhenAny(inFlight.Values);
+            var finishedNumber = inFlight.First(kv => kv.Value == finished).Key;
+            inFlight.Remove(finishedNumber);
+            var finishedResult = await finished;
+            resolved[finishedNumber] = (finishedResult.Segment, finishedResult.Result);
+        }
+
+        // 收尾：取消并清理"已派发到 boundary 以下、未提交"的下载（它们在空洞下方，无法连续利用）
+        backfillCts.Cancel();
+        foreach (var kv in inFlight)
+        {
+            try
+            {
+                var (_, result) = await kv.Value;
+                if (result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(result))
+                    discardedCleanupCount++;
+            }
+            catch
+            {
+                // 忽略已取消/失败的清理
+            }
+        }
+        foreach (var kv in resolved)
+        {
+            if (kv.Value.Result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(kv.Value.Result))
+                discardedCleanupCount++;
+        }
+        foreach (var kv in downloadCache)
+        {
+            if (kv.Value.Result is { Success: true } && !committed.Contains(kv.Key)
+                && !resolved.ContainsKey(kv.Key) && !inFlight.ContainsKey(kv.Key)
+                && TryDeleteDownloadResult(kv.Value.Result))
+            {
+                discardedCleanupCount++;
+            }
+        }
+
+        downloadedSegments.Sort((left, right) => left.Index.CompareTo(right.Index));
+        var acceptedRange = FormatContiguousIndexRanges(downloadedSegments.Select(s => s.Index).ToList());
+        var earliestAvailable = downloadedSegments.Count > 0
+            ? FormatLiveFromStartSegmentLabel(downloadedSegments[0])
+            : "none";
+        var failedBoundary = boundary != null ? boundary.Value.ToString(CultureInfo.InvariantCulture) : "none";
+        var startedDownloads = dispatchCount + reusedFromCache;
+        Logger.InfoMarkUp($"[darkorange3_1]Live from start summary (descending) for {streamLabel}: accepted_total={downloadedSegments.Count}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}, boundary_probes={downloadCache.Count}, downloads_started={startedDownloads}, discarded_cleanup={discardedCleanupCount}.[/]");
+
+        if (downloadedSegments.Count > 0)
+        {
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start downloaded {downloadedSegments.Count} contiguous earlier segment(s) for {streamLabel}: {acceptedRange}.[/]");
+        }
+    }
+
+    /// <summary>
+    /// 构造并下载指定编号的回填分片：直接全量镜像竞速（hostMirrorsOverride 用默认 null => 原始URL + 全部配置镜像），
+    /// 重试次数走 GetLiveFromStartDownloadRetryCount()（有镜像=0、无镜像=1）。用于倒序回填方案。
+    /// </summary>
+    private async Task<(MediaSegment Segment, DownloadResult? Result)> CreateAndDownloadFullRaceSegmentAsync(
+        LiveFromStartContext ctx,
+        long number,
+        CancellationToken cancellationToken)
+    {
+        var candidate = CreateFilledSegment(ctx.Template, ctx.TemplateUrlParts, number, ctx.TemplateNumber, ctx.SegmentDuration);
+        if (candidate == null)
+            return (new MediaSegment { Index = number }, null);
+
+        var filename = GetSegmentName(candidate, ctx.AllHasDatetime, ctx.AllSamePath);
+        var path = Path.Combine(ctx.TmpDir, filename + $".{ctx.Extension}.tmp");
+        return await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken);
+    }
+
+    /// <summary>
+    /// 阶段 1：指数探测 + 二分，定位 [floor, topAvailableSentinel) 区间内"最低可用"的 segment 编号（即 DVR 窗口的最早可用边界 E0）。
+    /// 假定可用性单调：&gt;= E0 可用、&lt; E0 不可用。探测期间下载到的可用分片全部进缓存，供升序回填复用。
+    /// </summary>
+    /// <returns>(最早可用编号 E0, 探测中胜出 host 的 URL, 是否改用倒序下载)；
+    /// 若 sentinel 之下没有任何可用分片则 E0 为 null；
+    /// 若检测到"可用区很浅"（首次失败发生在 depth&gt;60 且此前最深仅确认到 depth≤60）则 UseDescending 为 true（E0 不再有意义，交由倒序方案处理）。</returns>
+    private async Task<(long? Earliest, string? WinningUrl, bool UseDescending)> LocateEarliestAvailableLiveFromStartNumberAsync(
+        LiveFromStartContext ctx,
+        long topAvailableSentinel,
+        long floor,
+        Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
+        CancellationToken cancellationToken)
+    {
+        var probeCount = 0;
+        // 统计各 host 在探测环节的胜出次数与一份样本 URL，回填锁定时选"胜出次数最多"的 host（最稳）。
+        var winCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var winSampleUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // 返回胜出次数最多的 host 的样本 URL；并列时取胜出次数高者中字典序最小，保证确定性。
+        string? BestWinnerUrl()
+        {
+            if (winCounts.Count == 0)
+                return null;
+            var bestHost = winCounts.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase).First().Key;
+            return winSampleUrls.GetValueOrDefault(bestHost);
+        }
+
+        async Task<DownloadResult?> ProbeAsync(long number, string phase)
+        {
+            probeCount++;
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start probe #{probeCount} ({phase}): checking segment {number}...[/]");
+            var (_, result) = await ProbeLiveFromStartNumberAsync(ctx, cache, number, cancellationToken);
+            if (result is { Success: true })
+            {
+                var host = TryParseUrlAuthority(result.RequestUrl)?.Host;
+                if (host != null)
+                {
+                    winCounts[host] = winCounts.GetValueOrDefault(host) + 1;
+                    winSampleUrls[host] = result.RequestUrl!;
+                }
+                Logger.InfoMarkUp(host != null
+                    ? $"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [green]available[/] on [cyan]{host.EscapeMarkup()}[/].[/]"
+                    : $"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [green]available[/].[/]");
+            }
+            else
+            {
+                Logger.InfoMarkUp($"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [red]unavailable[/].[/]");
+            }
+            return result;
+        }
+
+        void LogProbeWinDistribution()
+        {
+            if (winCounts.Count == 0)
+                return;
+            var dist = string.Join(", ", winCounts.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => $"{kv.Key.EscapeMarkup()}={kv.Value}"));
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: probe host win distribution -> {dist}.[/]");
+        }
+
+        // 指数探测：从 sentinel-1 向下，步长翻倍，直到命中一个不可用编号作为下界
+        long step = 1;
+        var lastAvailable = topAvailableSentinel; // sentinel 自身来自当前 playlist，假定可用
+        long? firstUnavailable = null;
+        var probe = topAvailableSentinel - 1;
+
+        while (probe >= floor && !STOP_FLAG && !cancellationToken.IsCancellationRequested)
+        {
+            var result = await ProbeAsync(probe, $"exponential, depth={topAvailableSentinel - probe}");
+            if (result is { Success: true })
+            {
+                lastAvailable = probe;
+                step *= 2;
+                probe -= step;
+            }
+            else
+            {
+                firstUnavailable = probe;
+
+                // 边界情况：可用区很浅（典型为刚开播不久、只缺开头一分钟以内的分片）。
+                // 只要首次失败时"此前最深仅确认到 depth≤60"（即整段可用区都被夹在 ~60 深以内，含极浅情形），
+                // 就不再做二分+升序，转交"倒序下载"方案——区间短、几乎不受过期影响，且天然停在第一个空洞、保证连续接边。
+                // 深 DVR 会先在 depth>60 处探测成功（使 lastAvailableDepth>60），不会命中此分支，仍走二分+升序。
+                var failedDepth = topAvailableSentinel - probe;
+                var lastAvailableDepth = topAvailableSentinel - lastAvailable;
+                if (lastAvailableDepth <= 60)
+                {
+                    Logger.InfoMarkUp($"[darkorange3_1]Live from start: shallow available region (first failure at depth {failedDepth}, deepest confirmed at depth {lastAvailableDepth}); switching to descending backfill.[/]");
+                    LogProbeWinDistribution();
+                    return (null, BestWinnerUrl(), true);
+                }
+                break;
+            }
+        }
+
+        if (STOP_FLAG || cancellationToken.IsCancellationRequested)
+            return (null, BestWinnerUrl(), false);
+
+        long lo;
+        long hi;
+        if (firstUnavailable == null)
+        {
+            // 一路探到 floor 仍全部可用
+            if (lastAvailable >= topAvailableSentinel)
+                return (null, BestWinnerUrl(), false); // sentinel 之下没有任何可用分片
+            lo = floor;
+            hi = lastAvailable;
+        }
+        else
+        {
+            if (lastAvailable >= topAvailableSentinel)
+                return (null, BestWinnerUrl(), false); // 连 sentinel-1 都不可用，没有更早分片可下
+            lo = firstUnavailable.Value + 1;
+            hi = lastAvailable;
+        }
+
+        if (lo < hi)
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: narrowing earliest available within {lo} ~ {hi} (binary search).[/]");
+
+        // 二分：在 [lo, hi] 中找最低可用编号（hi 已确认可用）
+        while (lo < hi && !STOP_FLAG && !cancellationToken.IsCancellationRequested)
+        {
+            var mid = lo + (hi - lo) / 2;
+            var result = await ProbeAsync(mid, $"binary, window {lo}~{hi}");
+            if (result is { Success: true })
+                hi = mid;
+            else
+                lo = mid + 1;
+        }
+
+        LogProbeWinDistribution();
+        return STOP_FLAG || cancellationToken.IsCancellationRequested ? (null, BestWinnerUrl(), false) : (lo, BestWinnerUrl(), false);
+    }
+
+    /// <summary>
+    /// 顺序探测单个编号（带缓存）。仅用于阶段 1（单线程），因此可安全写入共享缓存字典。
+    /// 探测使用 ctx.ProbeHostMirrors（多镜像时为前半部分），以减小对数次探测对镜像的压力。
+    /// </summary>
+    private async Task<(MediaSegment? Segment, DownloadResult? Result)> ProbeLiveFromStartNumberAsync(
+        LiveFromStartContext ctx,
+        Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
+        long number,
+        CancellationToken cancellationToken)
+    {
+        if (cache.TryGetValue(number, out var cached))
+            return cached;
+
+        var candidate = CreateFilledSegment(ctx.Template, ctx.TemplateUrlParts, number, ctx.TemplateNumber, ctx.SegmentDuration);
+        if (candidate == null)
+        {
+            var miss = ((MediaSegment?)null, (DownloadResult?)null);
+            cache[number] = miss;
+            return miss;
+        }
+
+        var filename = GetSegmentName(candidate, ctx.AllHasDatetime, ctx.AllSamePath);
+        var path = Path.Combine(ctx.TmpDir, filename + $".{ctx.Extension}.tmp");
+
+        // 探测整体超时：不可用分片的多 host 竞速需要等所有 host 都失败才退出，
+        // 若某 host 卡住（无响应），会一直拖到下载器内部的停滞判定（约 10s）才放弃，得不偿失。
+        // 给整个探测请求设一个 WAIT_SEC*2 的硬超时（下限 2s、上限 5s），到点取消全部竞速、快速判失败。
+        var probeTimeoutSec = Math.Clamp(WAIT_SEC * 2, 2, 5);
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(probeTimeoutSec));
+        var (_, result) = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, timeoutCts.Token, ctx.ProbeRetryCount, ctx.ProbeHostMirrors);
+        var entry = ((MediaSegment?)candidate, result);
+        cache[number] = entry;
+        return entry;
+    }
+
+    /// <summary>
+    /// 阶段 2：构造并下载指定编号的回填分片（并发安全，不写共享缓存）。
+    /// pinnedAuthority 非 null 时把分片 URL 锁定到探测胜出的 host 并禁用多 host 竞速（hostMirrorsOverride 传空数组）；
+    /// 若该片在锁定 host 上拿不到（如 404）且 allowFallback 为真，兜底对该单片恢复原始 URL 回退一次全量镜像竞速，成功则采纳并标记 Recovered。
+    /// allowFallback 为假（参差区快速跳过模式）时只做锁定 host 单点下载，失败即返回，不触发昂贵的全量竞速；
+    /// 返回值 FallbackAttempted 标识是否真的做过兜底竞速（用于收尾时区分"已确认不可补齐"与"仅快速跳过的可疑空洞"）。
+    /// </summary>
+    private async Task<(MediaSegment Segment, DownloadResult? Result, bool Recovered, bool FallbackAttempted)> CreateAndDownloadBackfillSegmentAsync(
+        LiveFromStartContext ctx,
+        long number,
+        Uri? pinnedAuthority,
+        CancellationToken cancellationToken,
+        bool allowFallback = true)
+    {
+        var candidate = CreateFilledSegment(ctx.Template, ctx.TemplateUrlParts, number, ctx.TemplateNumber, ctx.SegmentDuration);
+        if (candidate == null)
+            return (new MediaSegment { Index = number }, null, false, false);
+
+        var filename = GetSegmentName(candidate, ctx.AllHasDatetime, ctx.AllSamePath);
+        var path = Path.Combine(ctx.TmpDir, filename + $".{ctx.Extension}.tmp");
+
+        if (pinnedAuthority == null)
+        {
+            // 无镜像：本就单 host，无兜底概念，失败即确认。
+            var plain = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken);
+            return (plain.Segment, plain.Result, false, true);
+        }
+
+        // 锁定 host 单点下载（hostMirrorsOverride 传空数组 => 不竞速）
+        var originalUrl = candidate.Url;
+        if (!UrlHasAuthority(originalUrl, pinnedAuthority))
+            candidate.Url = RewriteUrlAuthority(originalUrl, pinnedAuthority);
+        var pinned = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: []);
+        if (pinned.Result is { Success: true })
+            return (pinned.Segment, pinned.Result, false, false);
+
+        if (STOP_FLAG || cancellationToken.IsCancellationRequested)
+            return (candidate, null, false, false);
+
+        if (!allowFallback)
+            // 参差区快速跳过：不触发全量竞速，标记为"未做兜底"（可疑空洞，收尾时按需复核）
+            return (candidate, null, false, false);
+
+        // 兜底：锁定 host 缺该片 -> 恢复原始 URL，回退一次全量镜像竞速（origin + 全部配置镜像）
+        candidate.Url = originalUrl;
+        var raced = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: null);
+        var recovered = raced.Result is { Success: true };
+        if (recovered)
+            Logger.DebugMarkUp($"[grey]Live from start: segment {number} missing on pinned host, recovered via full-mirror race.[/]");
+        return (raced.Segment, raced.Result, recovered, true);
+    }
+
+    private static Uri? TryParseUrlAuthority(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri : null;
+    }
+
+    private static bool UrlHasAuthority(string url, Uri authority)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+
+        return string.Equals(uri.Scheme, authority.Scheme, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(uri.Host, authority.Host, StringComparison.OrdinalIgnoreCase)
+               && uri.Port == authority.Port;
+    }
+
+    private static string RewriteUrlAuthority(string url, Uri authority)
+    {
+        try
+        {
+            var ub = new UriBuilder(new Uri(url))
+            {
+                Scheme = authority.Scheme,
+                Host = authority.Host,
+                Port = authority.IsDefaultPort ? -1 : authority.Port,
+            };
+            return ub.Uri.AbsoluteUri;
+        }
+        catch
+        {
+            return url;
+        }
+    }
+
     private async Task<(MediaSegment Segment, DownloadResult? Result)> DownloadLiveFromStartSegmentAsync(
         MediaSegment segment,
         string path,
         SpeedContainer speedContainer,
         Dictionary<string, string> headers,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? retryCount = null,
+        string[]? hostMirrorsOverride = null)
     {
         try
         {
-            var result = await Downloader.DownloadSegmentAsync(segment, path, speedContainer, headers, GetLiveFromStartDownloadRetryCount(), cancellationToken);
+            var result = await Downloader.DownloadSegmentAsync(segment, path, speedContainer, headers, retryCount ?? GetLiveFromStartDownloadRetryCount(), cancellationToken, hostMirrorsOverride);
             return (segment, result);
         }
         catch
@@ -1396,46 +2021,6 @@ internal class SimpleLiveRecordManager2
         return mirrors is { Length: > 0 } && mirrors.Any(m => !string.IsNullOrWhiteSpace(m)) ? 0 : 1;
     }
 
-    private static LiveFromStartDiscardStats DiscardUnusedLiveFromStartDownloads(IEnumerable<(MediaSegment Segment, DownloadResult? Result)> downloads)
-    {
-        var discardedCount = 0;
-        MediaSegment? earliestSuccessfulSegment = null;
-        foreach (var (segment, result) in downloads)
-        {
-            if (result is { Success: true })
-                earliestSuccessfulSegment = GetEarlierLiveFromStartSegment(earliestSuccessfulSegment, segment);
-
-            if (TryDeleteDownloadResult(result))
-                discardedCount++;
-        }
-
-        return new LiveFromStartDiscardStats(discardedCount, earliestSuccessfulSegment);
-    }
-
-    private static async Task<LiveFromStartDiscardStats> DiscardUnusedLiveFromStartDownloadsAsync(IEnumerable<Task<(MediaSegment Segment, DownloadResult? Result)>> tasks)
-    {
-        var discardedCount = 0;
-        MediaSegment? earliestSuccessfulSegment = null;
-        foreach (var task in tasks)
-        {
-            try
-            {
-                var (segment, result) = await task;
-                if (result is { Success: true })
-                    earliestSuccessfulSegment = GetEarlierLiveFromStartSegment(earliestSuccessfulSegment, segment);
-
-                if (TryDeleteDownloadResult(result))
-                    discardedCount++;
-            }
-            catch
-            {
-                // 忽略回溯边界之外的并发下载清理失败
-            }
-        }
-
-        return new LiveFromStartDiscardStats(discardedCount, earliestSuccessfulSegment);
-    }
-
     private static bool TryDeleteDownloadResult(DownloadResult? result)
     {
         if (result is not { Success: true } || string.IsNullOrEmpty(result.ActualFilePath))
@@ -1448,21 +2033,10 @@ internal class SimpleLiveRecordManager2
         }
         catch
         {
-            // 忽略回溯边界之外的并发下载清理失败
+            // 忽略未提交分片的清理失败
         }
 
         return true;
-    }
-
-    private static MediaSegment? GetEarlierLiveFromStartSegment(MediaSegment? current, MediaSegment? candidate)
-    {
-        if (candidate == null)
-            return current;
-
-        if (current == null || candidate.Index < current.Index)
-            return candidate;
-
-        return current;
     }
 
     private static string FormatLiveFromStartSegmentLabel(MediaSegment segment)
@@ -1647,6 +2221,37 @@ internal class SimpleLiveRecordManager2
     private static string FormatSegmentRanges(IEnumerable<MissingSegmentRange> ranges)
     {
         return string.Join(", ", ranges.Select(r => r.Start == r.End ? r.Start.ToString() : $"{r.Start} ~ {r.End}"));
+    }
+
+    /// <summary>
+    /// 把一组升序编号压缩成连续子区间字符串（遇到断点就断开），例如 [1,2,3,7,8] -> "1 ~ 3, 7 ~ 8"。
+    /// 用于真实反映 live-from-start 已接受/缺失片段的范围，避免把空洞误并入单一区间。
+    /// </summary>
+    private static string FormatContiguousIndexRanges(IReadOnlyList<long> sortedIndices)
+    {
+        if (sortedIndices.Count == 0)
+            return "none";
+
+        var ranges = new List<MissingSegmentRange>();
+        var start = sortedIndices[0];
+        var prev = sortedIndices[0];
+
+        for (var i = 1; i < sortedIndices.Count; i++)
+        {
+            var current = sortedIndices[i];
+            if (current == prev + 1)
+            {
+                prev = current;
+                continue;
+            }
+
+            ranges.Add(new MissingSegmentRange(start, prev, SegmentGapSource.CurrentPlaylist));
+            start = current;
+            prev = current;
+        }
+
+        ranges.Add(new MissingSegmentRange(start, prev, SegmentGapSource.CurrentPlaylist));
+        return FormatSegmentRanges(ranges);
     }
 
     private static MediaSegment? CreateFilledSegment(MediaSegment template, SegmentUrlParts templateUrlParts, long index, long templateNumber, double? segmentDuration = null)
