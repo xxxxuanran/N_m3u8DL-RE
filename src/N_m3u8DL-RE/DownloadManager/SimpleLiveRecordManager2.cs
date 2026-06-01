@@ -1230,6 +1230,9 @@ internal class SimpleLiveRecordManager2
             var allHasDatetime = segments.All(s => s.DateTime != null);
             var allName = segments.Select(s => OtherUtil.GetFileNameFromInput(s.Url, false));
             var allSamePath = allName.Count() > 1 && allName.Distinct().Count() == 1;
+            var backfillSegmentDuration = streamSpec.Playlist?.TargetDuration is > 0
+                ? streamSpec.Playlist.TargetDuration.Value
+                : firstSegment.Duration;
             var maxParallel = Math.Max(1, DownloaderConfig.MyOptions.ThreadCount);
             var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>>();
             var completed = new Dictionary<long, (MediaSegment Segment, DownloadResult? Result)>();
@@ -1241,28 +1244,14 @@ internal class SimpleLiveRecordManager2
             var discardedCleanupCount = 0;
             MediaSegment? failedBoundarySegment = null;
             MediaSegment? earliestAvailableSegment = null;
+            var stopCreatingDownloads = false;
+            long? highestUnavailableNumber = null;
             using var backfillCts = new CancellationTokenSource();
 
             Logger.InfoMarkUp($"[darkorange3_1]Live from start: downloading earlier segments before {firstNumber} for {streamLabel}.[/]");
 
-            while (!STOP_FLAG && (nextNumberToCreate >= 0 || inFlight.Count > 0 || completed.Count > 0))
+            while (!STOP_FLAG && ((!stopCreatingDownloads && nextNumberToCreate >= 0) || inFlight.Count > 0 || completed.Count > 0))
             {
-                while (!STOP_FLAG && nextNumberToCreate >= 0 && inFlight.Count < maxParallel)
-                {
-                    var candidate = CreateFilledSegment(firstSegment, firstUrlParts, nextNumberToCreate, firstNumber);
-                    if (candidate == null)
-                    {
-                        nextNumberToCreate = -1;
-                        break;
-                    }
-
-                    var filename = GetSegmentName(candidate, allHasDatetime, allSamePath);
-                    var path = Path.Combine(tmpDir, filename + $".{streamSpec.Extension ?? "clip"}.tmp");
-                    inFlight[nextNumberToCreate] = DownloadLiveFromStartSegmentAsync(candidate, path, speedContainer, headers, backfillCts.Token);
-                    startedDownloadsCount++;
-                    nextNumberToCreate--;
-                }
-
                 var stopBacktracking = false;
                 while (completed.TryGetValue(nextNumberToCommit, out var completedDownload))
                 {
@@ -1272,6 +1261,7 @@ internal class SimpleLiveRecordManager2
                     if (result is not { Success: true })
                     {
                         failedBoundarySegment = segment;
+                        highestUnavailableNumber = nextNumberToCommit;
                         Logger.InfoMarkUp($"[darkorange3_1]Live from start stopped before {OtherUtil.GetFileNameFromInput(segment.Url, false).EscapeMarkup()}: segment is unavailable.[/]");
                         backfillCts.Cancel();
                         var completedDiscardStats = DiscardUnusedLiveFromStartDownloads(completed.Values);
@@ -1300,6 +1290,22 @@ internal class SimpleLiveRecordManager2
                 if (stopBacktracking)
                     break;
 
+                while (!STOP_FLAG && !stopCreatingDownloads && nextNumberToCreate >= 0 && inFlight.Count < maxParallel)
+                {
+                    var candidate = CreateFilledSegment(firstSegment, firstUrlParts, nextNumberToCreate, firstNumber, backfillSegmentDuration);
+                    if (candidate == null)
+                    {
+                        nextNumberToCreate = -1;
+                        break;
+                    }
+
+                    var filename = GetSegmentName(candidate, allHasDatetime, allSamePath);
+                    var path = Path.Combine(tmpDir, filename + $".{streamSpec.Extension ?? "clip"}.tmp");
+                    inFlight[nextNumberToCreate] = DownloadLiveFromStartSegmentAsync(candidate, path, speedContainer, headers, backfillCts.Token);
+                    startedDownloadsCount++;
+                    nextNumberToCreate--;
+                }
+
                 if (inFlight.Count == 0)
                 {
                     var cleanupStats = DiscardUnusedLiveFromStartDownloads(completed.Values);
@@ -1312,7 +1318,17 @@ internal class SimpleLiveRecordManager2
                 var finishedTask = await Task.WhenAny(inFlight.Values);
                 var finishedNumber = inFlight.First(kv => kv.Value == finishedTask).Key;
                 inFlight.Remove(finishedNumber);
-                completed[finishedNumber] = await finishedTask;
+                var finishedDownload = await finishedTask;
+                completed[finishedNumber] = finishedDownload;
+                if (finishedDownload.Result is not { Success: true })
+                {
+                    stopCreatingDownloads = true;
+                    if (highestUnavailableNumber == null || finishedNumber > highestUnavailableNumber.Value)
+                    {
+                        highestUnavailableNumber = finishedNumber;
+                        failedBoundarySegment = finishedDownload.Segment;
+                    }
+                }
             }
 
             backfillCts.Cancel();
@@ -1623,17 +1639,18 @@ internal class SimpleLiveRecordManager2
         return string.Join(", ", ranges.Select(r => r.Start == r.End ? r.Start.ToString() : $"{r.Start} ~ {r.End}"));
     }
 
-    private static MediaSegment? CreateFilledSegment(MediaSegment template, SegmentUrlParts templateUrlParts, long index, long templateNumber)
+    private static MediaSegment? CreateFilledSegment(MediaSegment template, SegmentUrlParts templateUrlParts, long index, long templateNumber, double? segmentDuration = null)
     {
         var newUrl = ReplaceUrlFileName(templateUrlParts, FormatSegmentNumber(index, templateUrlParts.FileNameWithoutExtension));
         if (newUrl == null) return null;
 
+        var duration = segmentDuration ?? template.Duration;
         return new MediaSegment
         {
             Index = index,
-            Duration = template.Duration,
+            Duration = duration,
             Title = template.Title,
-            DateTime = template.DateTime?.AddSeconds(-(templateNumber - index) * template.Duration),
+            DateTime = template.DateTime?.AddSeconds(-(templateNumber - index) * duration),
             StartRange = template.StartRange,
             ExpectLength = template.ExpectLength,
             Url = newUrl,
