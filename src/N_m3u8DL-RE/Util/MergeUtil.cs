@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Log;
+using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Entity;
 using Spectre.Console;
 using System.Diagnostics;
@@ -197,6 +197,8 @@ internal static class MergeUtil
             command.Append($" -strict unofficial -c:a copy -c:v copy ");
         else if (muxFormat == MuxFormat.MKV)
             command.Append($" -strict unofficial -c:a copy -c:v copy -c:s {(srt ? "srt" : "webvtt")} ");
+        else if (muxFormat == MuxFormat.FLV)
+            command.Append($" -strict unofficial -c:a copy -c:v copy ");
         else throw new ArgumentException($"unknown format: {muxFormat}");
 
         // CLEAN

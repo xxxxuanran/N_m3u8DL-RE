@@ -28,6 +28,7 @@ internal class SimpleLiveRecordManager2
     StreamExtractor StreamExtractor;
     List<StreamSpec> SelectedSteams;
     ConcurrentDictionary<int, string> PipeSteamNamesDic = new();
+    MuxFormat? resolvedLivePipeMuxFormat;
     List<OutputFile> OutputFiles = [];
     DateTime? PublishDateTime;
     bool STOP_FLAG = false;
@@ -113,6 +114,14 @@ internal class SimpleLiveRecordManager2
             playlist.PendingMediaInit = null;
             playlist.MediaInitChanged = false;
         }
+
+        resolvedLivePipeMuxFormat = null;
+    }
+
+    private MuxFormat GetLivePipeMuxFormat()
+    {
+        return resolvedLivePipeMuxFormat ??= PipeUtil.ResolveLivePipeMuxFormat(
+            DownloaderConfig.MyOptions.LivePipeMuxOptions?.MuxFormat, SelectedSteams);
     }
 
     // 从文件读取KEY
@@ -645,7 +654,8 @@ internal class SimpleLiveRecordManager2
                     else
                     {
                         // 创建管道
-                        output = Path.ChangeExtension(output, ".ts");
+                        var muxFormat = GetLivePipeMuxFormat();
+                        output = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(muxFormat));
                         var pipeName = $"RE_pipe_{Guid.NewGuid()}";
                         fileOutputStream = PipeUtil.CreatePipe(pipeName);
                         Logger.InfoMarkUp($"{ResString.namedPipeCreated} [cyan]{pipeName.EscapeMarkup()}[/]");
@@ -654,7 +664,7 @@ internal class SimpleLiveRecordManager2
                         {
                             var names = PipeSteamNamesDic.OrderBy(i => i.Key).Select(k => k.Value).ToArray();
                             Logger.WarnMarkUp($"{ResString.namedPipeMux} [deepskyblue1]{Path.GetFileName(output).EscapeMarkup()}[/]");
-                            var t = PipeUtil.StartPipeMuxAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, names, output);
+                            var t = PipeUtil.StartPipeMuxAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, names, output, muxFormat);
                         }
 
                         // Windows only

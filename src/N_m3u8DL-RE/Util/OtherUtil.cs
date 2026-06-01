@@ -164,6 +164,31 @@ internal static partial class OtherUtil
             MuxFormat.MP4 => ".mp4",
             MuxFormat.MKV => ".mkv",
             MuxFormat.TS => ".ts",
+            MuxFormat.FLV => ".flv",
+            _ => throw new ArgumentException($"unknown format: {muxFormat}")
+        };
+    }
+
+    /// <summary>
+    /// live-pipe-mux 输出侧的 ffmpeg 容器参数（不含 -shortest 与输出路径）。
+    /// 参数面向「边录边开、边写边看」：尽快刷盘、分片/重发头信息，避免播放器等到文件结束才读 moov。
+    /// </summary>
+    public static string GetFfmpegPipeMuxOutputArgs(MuxFormat muxFormat)
+    {
+        // 各容器共用：每包立刻刷到磁盘，降低 mux 缓冲带来的预览延迟
+        const string flushPackets = "-flush_packets 1";
+
+        return muxFormat switch
+        {
+            // fMP4：empty_moov 让 moov 在文件头即可解析；frag_keyframe 在关键帧切分；
+            // default_base_moof 保证 moof 与轨道基线对齐；frag_duration 约 1s 分片，兼顾延迟与开销
+            MuxFormat.MP4 =>
+                $"-f mp4 -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 1000000 -muxdelay 0 -muxpreload 0 {flushPackets}",
+            // Matroska 对未完成文件较友好，配合 flush_packets 便于实时追加预览
+            MuxFormat.MKV => $"-f matroska {flushPackets}",
+            // resend_headers 周期性重发 PAT/PMT，中途打开 .ts 的播放器也能尽快起播
+            MuxFormat.TS => $"-f mpegts -mpegts_flags +resend_headers {flushPackets}",
+            MuxFormat.FLV => $"-f flv {flushPackets}",
             _ => throw new ArgumentException($"unknown format: {muxFormat}")
         };
     }

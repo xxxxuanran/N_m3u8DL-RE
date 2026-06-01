@@ -103,7 +103,7 @@ internal static partial class CommandInvoker
     private static readonly Option<bool> LivePerformAsVod = new Option<bool>("--live-perform-as-vod") { Description = ResString.cmd_livePerformAsVod }.WithDefault(false);
     private static readonly Option<bool> LiveRealTimeMerge = new Option<bool>("--live-real-time-merge") { Description = ResString.cmd_liveRealTimeMerge }.WithDefault(false);
     private static readonly Option<bool> LiveKeepSegments = new Option<bool>("--live-keep-segments") { Description = ResString.cmd_liveKeepSegments }.WithDefault(true);
-    private static readonly Option<bool> LivePipeMux = new Option<bool>("--live-pipe-mux") { Description = ResString.cmd_livePipeMux }.WithDefault(false);
+    private static readonly Option<LivePipeMuxOptions?> LivePipeMux = new Option<LivePipeMuxOptions?>("--live-pipe-mux") { Arity = ArgumentArity.ZeroOrOne, HelpName = "OPTIONS", Description = ResString.cmd_livePipeMux, CustomParser = ParseLivePipeMux };
     private static readonly Option<TimeSpan?> LiveRecordLimit = new("--live-record-limit") { HelpName = "HH:mm:ss", Description = ResString.cmd_liveRecordLimit, CustomParser = ParseLiveLimit };
     private static readonly Option<int?> LiveWaitTime = new("--live-wait-time") { HelpName = "SEC", Description = ResString.cmd_liveWaitTime };
     private static readonly Option<int> LiveTakeCount = new("--live-take-count") { HelpName = "NUM", Description = ResString.cmd_liveTakeCount, DefaultValueFactory = _ => 16 };
@@ -604,6 +604,31 @@ internal static partial class CommandInvoker
         };
     }
 
+    private static LivePipeMuxOptions? ParseLivePipeMux(ArgumentResult result)
+    {
+        // 未带任何参数时，格式留空交由后续按输入类型自动推断（fMP4 => mp4, 其余 => ts）
+        if (result.Tokens.Count == 0)
+            return new LivePipeMuxOptions();
+
+        // 复用 mux-after-done 的解析与校验逻辑
+        var muxOptions = ParseMuxAfterDone(result);
+        if (muxOptions == null)
+            return null;
+
+        // live-pipe-mux 通过管道实时混流，仅支持 ffmpeg
+        if (muxOptions.UseMkvmerge)
+        {
+            result.AddError("live-pipe-mux only supports muxer=ffmpeg");
+            return null;
+        }
+
+        return new LivePipeMuxOptions
+        {
+            MuxFormat = muxOptions.MuxFormat,
+            BinPath = muxOptions.BinPath
+        };
+    }
+
     private static bool HasOption(this ParseResult result, Option option)
     {
         var allTokens = result.Tokens.Select(x => x.Value).ToList();
@@ -676,7 +701,6 @@ internal static partial class CommandInvoker
             LiveRecordLimit = result.GetValue(LiveRecordLimit),
             TaskStartAt = result.GetValue(TaskStartAt),
             LivePerformAsVod = result.GetValue(LivePerformAsVod),
-            LivePipeMux = result.GetValue(LivePipeMux),
             LiveFixVttByAudio = result.GetValue(LiveFixVttByAudio),
             UseSystemProxy = result.GetValue(UseSystemProxy),
             CustomProxy = result.GetValue(CustomProxy),
@@ -738,6 +762,14 @@ internal static partial class CommandInvoker
             CultureUtil.ChangeCurrentCultureName(option.UILanguage);
         }
 
+        if (result.HasOption(LivePipeMux))
+        {
+            option.LivePipeMux = true;
+            option.LivePipeMuxOptions = result.GetValue(LivePipeMux) ?? new LivePipeMuxOptions();
+            if (!string.IsNullOrEmpty(option.LivePipeMuxOptions.BinPath))
+                option.FFmpegBinaryPath ??= option.LivePipeMuxOptions.BinPath;
+        }
+
         // 混流设置
         var muxAfterDoneValue = result.GetValue(MuxAfterDone);
         if (muxAfterDoneValue == null) return option;
@@ -761,6 +793,7 @@ internal static partial class CommandInvoker
             var msg = option switch
             {
                 "mux-after-done" => ResString.cmd_muxAfterDone_more,
+                "live-pipe-mux" => ResString.cmd_livePipeMux_more,
                 "mux-import" => ResString.cmd_muxImport_more,
                 "select-video" => ResString.cmd_selectVideo_more,
                 "select-audio" => ResString.cmd_selectAudio_more,

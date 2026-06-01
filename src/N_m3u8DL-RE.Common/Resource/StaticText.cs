@@ -537,9 +537,42 @@ internal static class StaticText
         ),
         ["cmd_livePipeMux"] = new TextContainer
         (
-            zhCN: "录制直播并开启实时合并时通过管道+ffmpeg实时混流到TS文件",
-            zhTW: "錄製直播並開啟即時合併時通過管道+ffmpeg即時混流到TS文件",
-            enUS: "Real-time muxing to TS file through pipeline + ffmpeg (liveRealTimeMerge enabled)"
+            zhCN: "录制直播并开启实时合并时通过管道+ffmpeg实时混流. 输入 \"--morehelp live-pipe-mux\" 以查看详细信息",
+            zhTW: "錄製直播並開啟即時合併時通過管道+ffmpeg即時混流. 輸入 \"--morehelp live-pipe-mux\" 以查看詳細訊息",
+            enUS: "Real-time muxing through pipeline + ffmpeg (liveRealTimeMerge enabled). Use \"--morehelp live-pipe-mux\" for more details"
+        ),
+        ["cmd_livePipeMux_more"] = new TextContainer
+        (
+            zhCN: "录制直播并开启实时合并时通过管道+ffmpeg实时混流. 你能够以:分隔形式指定如下参数:\r\n\r\n" +
+                  "* format=FORMAT: 指定混流容器 mkv, mp4, ts, flv (未指定时 fMP4 输入默认 mp4，其余默认 ts)\r\n" +
+                  "* bin_path=PATH: 指定 ffmpeg 路径 (默认: 自动寻找)\r\n\r\n" +
+                  "例如: \r\n" +
+                  "# 使用默认格式\r\n" +
+                  "--live-pipe-mux\r\n" +
+                  "# 混流为 mkv 容器\r\n" +
+                  "--live-pipe-mux format=mkv\r\n" +
+                  "# 混流为 mp4 并指定 ffmpeg 路径\r\n" +
+                  "--live-pipe-mux format=mp4:bin_path=\"C\\:\\ffmpeg\\bin\\ffmpeg.exe\"\r\n",
+            zhTW: "錄製直播並開啟即時合併時通過管道+ffmpeg即時混流. 你能夠以:分隔形式指定如下參數:\r\n\r\n" +
+                  "* format=FORMAT: 指定混流容器 mkv, mp4, ts, flv (未指定時 fMP4 輸入預設 mp4，其餘預設 ts)\r\n" +
+                  "* bin_path=PATH: 指定 ffmpeg 路徑 (默認: 自動尋找)\r\n\r\n" +
+                  "例如: \r\n" +
+                  "# 使用默認格式\r\n" +
+                  "--live-pipe-mux\r\n" +
+                  "# 混流為 mkv 容器\r\n" +
+                  "--live-pipe-mux format=mkv\r\n" +
+                  "# 混流為 mp4 並指定 ffmpeg 路徑\r\n" +
+                  "--live-pipe-mux format=mp4:bin_path=\"C\\:\\ffmpeg\\bin\\ffmpeg.exe\"\r\n",
+            enUS: "Real-time muxing through pipeline + ffmpeg when liveRealTimeMerge is enabled. OPTIONS is a colon separated list of:\r\n\r\n" +
+                  "* format=FORMAT: set container. mkv, mp4, ts, flv (defaults to mp4 for fMP4 input, ts otherwise)\r\n" +
+                  "* bin_path=PATH: set ffmpeg binary path. (Default: auto)\r\n\r\n" +
+                  "Examples: \r\n" +
+                  "# use auto-detected format\r\n" +
+                  "--live-pipe-mux\r\n" +
+                  "# mux to mkv\r\n" +
+                  "--live-pipe-mux format=mkv\r\n" +
+                  "# mux to mp4 with custom ffmpeg path\r\n" +
+                  "--live-pipe-mux format=mp4:bin_path=\"C\\:\\ffmpeg\\bin\\ffmpeg.exe\"\r\n"
         ),
         ["cmd_liveKeepSegments"] = new TextContainer
         (
@@ -748,7 +781,7 @@ internal static class StaticText
         ["cmd_muxAfterDone_more"] = new TextContainer
         (
             zhCN: "所有工作完成时尝试混流分离的音视频. 你能够以:分隔形式指定如下参数:\r\n\r\n" +
-                  "* format=FORMAT: 指定混流容器 mkv, mp4, ts\r\n" +
+                  "* format=FORMAT: 指定混流容器 mkv, mp4, ts, flv\r\n" +
                   "* muxer=MUXER: 指定混流程序 ffmpeg, mkvmerge (默认: ffmpeg)\r\n" +
                   "* bin_path=PATH: 指定程序路径 (默认: 自动寻找)\r\n" +
                   "* skip_sub=BOOL: 是否忽略字幕文件 (默认: false)\r\n" +
@@ -761,7 +794,7 @@ internal static class StaticText
                   "# 使用mkvmerge, 自定义程序路径\r\n" +
                   "-M format=mkv:muxer=mkvmerge:bin_path=\"C\\:\\Program Files\\MKVToolNix\\mkvmerge.exe\"\r\n",
             zhTW: "所有工作完成時嘗試混流分離的影音. 你能夠以:分隔形式指定如下參數:\r\n\r\n" +
-                  "* format=FORMAT: 指定混流容器 mkv, mp4, ts\r\n" +
+                  "* format=FORMAT: 指定混流容器 mkv, mp4, ts, flv\r\n" +
                   "* muxer=MUXER: 指定混流程序 ffmpeg, mkvmerge (默認: ffmpeg)\r\n" +
                   "* bin_path=PATH: 指定程序路徑 (默認: 自動尋找)\r\n" +
                   "* skip_sub=BOOL: 是否忽略字幕文件 (默認: false)\r\n" +
@@ -774,7 +807,7 @@ internal static class StaticText
                   "# 使用mkvmerge, 自訂程序路徑\r\n" +
                   "-M format=mkv:muxer=mkvmerge:bin_path=\"C\\:\\Program Files\\MKVToolNix\\mkvmerge.exe\"\r\n",
             enUS: "When all works is done, try to mux the downloaded streams. OPTIONS is a colon separated list of:\r\n\r\n" +
-                  "* format=FORMAT: set container. mkv, mp4, ts\r\n" +
+                  "* format=FORMAT: set container. mkv, mp4, ts, flv\r\n" +
                   "* muxer=MUXER: set muxer. ffmpeg, mkvmerge (Default: ffmpeg)\r\n" +
                   "* bin_path=PATH: set binary file path. (Default: auto)\r\n" +
                   "* skip_sub=BOOL: set whether or not skip subtitle files (Default: false)\r\n" +
