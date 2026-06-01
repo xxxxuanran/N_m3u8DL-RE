@@ -57,7 +57,7 @@ yay -Syu n-m3u8dl-re-git
 | `--live-host-mirror <HOST>` | 为直播分片配置镜像 Host，主 URL 与各镜像**并发拉取**，采用最先成功的结果。可重复指定；支持 `hostname`、`host:port` 或完整 `http(s)://` URL。 |
 | `--live-keep-m3u8-updated` | 录制直播时持续追加更新临时目录中的 `raw.m3u8`，保留首次播放列表头部；只追加源端新出现的分片块，不包含自动补洞的分片。 |
 | `--live-fill-segments-gap` | 刷新播放列表出现序号间隙时，按连续数字规律**自动补齐**缺失分片（默认开启）。仅在首次 media playlist 确认各 segment URL query 一致时才会补齐。 |
-| `--live-fill-segments-gap-max <NUM>` | 单次自动补齐允许填补的最大分片数量。未指定时默认为 `max(1, 60 ÷ 刷新间隔秒数)`，其中刷新间隔取自 M3U8 播放列表（约为该次列表内分片总时长的一半再提前 2 秒），也可由 `--live-wait-time` 覆盖。 |
+| `--live-fill-segments-gap-max <NUM>` | 单次自动补齐允许填补的最大分片数量。未指定时默认为 `max(1, min(60, ceil(60/wait_time)))`，其中 `wait_time` 为刷新间隔秒数，也可由 `--live-wait-time` 覆盖。 |
 | `--live-restart-on-ext-map-change` | 检测到 `EXT-X-MAP`（初始化分片）变化时，**收尾当前文件并以新 init 分片继续录制**（默认开启）。设为 `false` 时改为直接停止录制（与上游旧行为接近）。 |
 
 #### 输出与网络
@@ -160,7 +160,7 @@ Options:
   --live-take-count <NUM>                                 手动设置录制直播时首次获取分片的数量 [default: 16]
   --live-keep-m3u8-updated                                录制直播时持续追加更新临时目录中的 raw.m3u8，保留首次播放列表头部，不包含自动补洞的分片 [default: False]
   --live-fill-segments-gap                                录制直播刷新播放列表出现间隙时，按可预测的连续数字命名规律自动补齐缺失的分片 [default: True]
-  --live-fill-segments-gap-max <NUM>                      录制直播自动补齐缺失分片时允许补齐的最大数量
+  --live-fill-segments-gap-max <NUM>                      录制直播自动补齐缺失分片时允许补齐的最大数量；未指定时默认为 max(1, min(60, ceil(60/wait_time)))，wait_time 为刷新间隔秒数（可由 --live-wait-time 指定）
   --live-restart-on-ext-map-change                        录制直播时若检测到EXT-X-MAP变动，自动收尾当前输出并以新的初始化分片重启录制；关闭时将直接停止录制 [default: True]
   --mux-import <OPTIONS>                                  混流时引入外部媒体文件. 输入 "--morehelp mux-import" 以查看详细信息
   -sv, --select-video <OPTIONS>                           通过正则表达式选择符合要求的视频流. 输入 "--morehelp select-video" 以查看详细信息

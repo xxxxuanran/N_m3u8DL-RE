@@ -1744,6 +1744,11 @@ internal class SimpleLiveRecordManager2
         return path[..(lastSlash + 1)] + newFileNameNoExt + urlParts.Extension + urlParts.Query;
     }
 
+    private static long GetDefaultLiveFillSegmentsGapMax(int waitTime)
+    {
+        return Math.Max(1L, Math.Min(60L, (long)Math.Ceiling(60D / waitTime)));
+    }
+
     public async Task<bool> StartRecordAsync()
     {
         var takeLastCount = DownloaderConfig.MyOptions.LiveFromStart ? int.MaxValue : DownloaderConfig.MyOptions.LiveTakeCount;
@@ -1773,7 +1778,7 @@ internal class SimpleLiveRecordManager2
             }
             if (WAIT_SEC <= 0) WAIT_SEC = 1;
             Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds{(WAIT_FROM_TARGET_DURATION ? " (based on #EXT-X-TARGETDURATION)" : "")}");
-            DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= Math.Max(1L, 60L / WAIT_SEC);
+            DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= GetDefaultLiveFillSegmentsGapMax(WAIT_SEC);
         }
         // 如果没有选中音频 取消通过音频修复vtt时间轴
         if (SelectedSteams.All(x => x.MediaType != MediaType.AUDIO))

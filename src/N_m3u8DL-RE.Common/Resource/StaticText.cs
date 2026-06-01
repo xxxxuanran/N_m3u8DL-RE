@@ -264,9 +264,9 @@ internal static class StaticText
         ),
         ["cmd_liveFillSegmentsGapMax"] = new TextContainer
         (
-            zhCN: "录制直播自动补齐缺失分片时允许补齐的最大数量；未指定时默认为 max(1, 60÷刷新间隔秒数)，刷新间隔由 M3U8 播放列表推算（亦可用 --live-wait-time 指定）",
-            zhTW: "錄製直播自動補齊缺失分片時允許補齊的最大數量；未指定時預設為 max(1, 60÷刷新間隔秒數)，刷新間隔由 M3U8 播放列表推算（亦可用 --live-wait-time 指定）",
-            enUS: "Max missing segments to fill per gap; default max(1, 60÷refresh interval sec) from M3U8 playlist (overridable via --live-wait-time)"
+            zhCN: "录制直播自动补齐缺失分片时允许补齐的最大数量；未指定时默认为 max(1, min(60, ceil(60/wait_time)))，wait_time 为刷新间隔秒数（可由 --live-wait-time 指定）",
+            zhTW: "錄製直播自動補齊缺失分片時允許補齊的最大數量；未指定時預設為 max(1, min(60, ceil(60/wait_time)))，wait_time 為刷新間隔秒數（可由 --live-wait-time 指定）",
+            enUS: "Max missing segments to fill per gap; default max(1, min(60, ceil(60/wait_time))), where wait_time is the refresh interval in seconds (overridable via --live-wait-time)"
         ),
         ["cmd_liveRestartOnExtMapChange"] = new TextContainer
         (
