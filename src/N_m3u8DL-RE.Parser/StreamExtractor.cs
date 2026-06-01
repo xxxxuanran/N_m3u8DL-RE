@@ -110,7 +110,9 @@ public class StreamExtractor
         {
             await semaphore.WaitAsync();
             Logger.Info(ResString.parsingStream);
-            return await extractor.ExtractStreamsAsync(rawText);
+            var result = await extractor.ExtractStreamsAsync(rawText);
+            UpdateRawFilesFromExtractor();
+            return result;
         }
         finally
         {
@@ -129,6 +131,7 @@ public class StreamExtractor
             await semaphore.WaitAsync();
             Logger.Info(ResString.parsingStream);
             await extractor.FetchPlayListAsync(streamSpecs);
+            UpdateRawFilesFromExtractor();
         }
         finally
         {
@@ -144,12 +147,21 @@ public class StreamExtractor
             await RetryUtil.WebRequestRetryAsync(async () =>
             {
                 await extractor.RefreshPlayListAsync(streamSpecs);
+                UpdateRawFilesFromExtractor();
                 return true;
             }, retryDelayMilliseconds: 1000, maxRetries: 5);
         }
         finally
         {
             semaphore.Release();
+        }
+    }
+
+    private void UpdateRawFilesFromExtractor()
+    {
+        if (extractor is HLSExtractor { LatestRawM3u8Content.Length: > 0 } hlsExtractor)
+        {
+            RawFiles["raw.m3u8"] = hlsExtractor.LatestRawM3u8Content;
         }
     }
 }

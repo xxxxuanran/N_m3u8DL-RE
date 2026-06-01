@@ -16,6 +16,7 @@ internal class HLSExtractor : IExtractor
     private string M3u8Url = string.Empty;
     private string BaseUrl = string.Empty;
     private string M3u8Content = string.Empty;
+    internal string LatestRawM3u8Content { get; private set; } = string.Empty;
     private bool MasterM3u8Flag = false;
 
     public ParserConfig ParserConfig { get; set; }
@@ -471,7 +472,8 @@ internal class HLSExtractor : IExtractor
 
     public async Task<List<StreamSpec>> ExtractStreamsAsync(string rawText)
     {
-        this.M3u8Content = rawText;
+        this.LatestRawM3u8Content = rawText.Trim();
+        this.M3u8Content = this.LatestRawM3u8Content;
         this.PreProcessContent();
         if (M3u8Content.Contains(HLSTags.ext_x_stream_inf))
         {
@@ -514,6 +516,8 @@ internal class HLSExtractor : IExtractor
             }
         }
 
+        this.LatestRawM3u8Content = this.M3u8Content.Trim();
+        this.M3u8Content = this.LatestRawM3u8Content;
         this.M3u8Url = url;
         this.SetBaseUrl();
         this.PreProcessContent();

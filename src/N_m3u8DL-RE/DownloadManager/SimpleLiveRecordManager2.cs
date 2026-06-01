@@ -13,6 +13,7 @@ using N_m3u8DL_RE.Parser.Mp4;
 using N_m3u8DL_RE.Util;
 using Spectre.Console;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.IO.Pipes;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
@@ -44,6 +45,10 @@ internal class SimpleLiveRecordManager2
     CancellationTokenSource CancellationTokenSource = new(); // 取消Wait
 
     private readonly Lock lockObj = new();
+    private readonly HashSet<string> rawM3u8SegmentIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> rawM3u8StateLines = new(StringComparer.Ordinal);
+    private string? rawM3u8Content;
+    private bool rawM3u8EndListWritten;
     TimeSpan? audioStart = null;
     public bool ShouldRestartOnMediaInitChanged { get; private set; } = false;
 
@@ -58,6 +63,8 @@ internal class SimpleLiveRecordManager2
     }
 
     private readonly record struct MissingSegmentRange(long Start, long End, SegmentGapSource Source);
+    private readonly record struct RawM3u8SegmentBlock(string Id, string[] Lines);
+    private readonly record struct RawM3u8ParseResult(List<RawM3u8SegmentBlock> Segments, bool HasEndList);
 
     public SimpleLiveRecordManager2(DownloaderConfig downloaderConfig, List<StreamSpec> selectedSteams, StreamExtractor streamExtractor)
     {
@@ -802,7 +809,11 @@ internal class SimpleLiveRecordManager2
                 // Logger.WarnMarkUp($"wait {waitSec}s");
                 if (!STOP_FLAG) await Task.Delay(waitSec * 1000, CancellationTokenSource.Token);
                 // 刷新列表
-                if (!STOP_FLAG) await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList());
+                if (!STOP_FLAG)
+                {
+                    await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList());
+                    await UpdateRawM3u8Async();
+                }
             }
             catch (OperationCanceledException oce) when (oce.CancellationToken == CancellationTokenSource.Token)
             {
@@ -818,6 +829,230 @@ internal class SimpleLiveRecordManager2
                     target.Complete();
                 }
             }
+        }
+    }
+
+    private async Task UpdateRawM3u8Async()
+    {
+        if (!DownloaderConfig.MyOptions.LiveKeepM3u8Updated)
+            return;
+
+        if (!StreamExtractor.RawFiles.TryGetValue("raw.m3u8", out var rawM3u8) || string.IsNullOrWhiteSpace(rawM3u8))
+            return;
+
+        if (!Directory.Exists(DownloaderConfig.DirPrefix))
+            Directory.CreateDirectory(DownloaderConfig.DirPrefix);
+
+        var file = Path.Combine(DownloaderConfig.DirPrefix, "raw.m3u8");
+        if (rawM3u8Content == null)
+        {
+            await InitializeRawM3u8AccumulatorAsync(file, rawM3u8);
+            return;
+        }
+
+        if (rawM3u8EndListWritten)
+            return;
+
+        var parsed = ParseRawM3u8(rawM3u8);
+        var appendedLines = new List<string>();
+        foreach (var segment in parsed.Segments)
+        {
+            if (!rawM3u8SegmentIds.Add(segment.Id))
+                continue;
+
+            appendedLines.AddRange(FilterRawM3u8SegmentBlockLines(segment.Lines));
+        }
+
+        if (parsed.HasEndList && !rawM3u8EndListWritten)
+        {
+            appendedLines.Add("#EXT-X-ENDLIST");
+            rawM3u8EndListWritten = true;
+        }
+
+        if (appendedLines.Count == 0)
+            return;
+
+        var appendText = BuildRawM3u8AppendText(appendedLines);
+        await File.AppendAllTextAsync(file, appendText, Encoding.UTF8);
+        rawM3u8Content += appendText;
+    }
+
+    private async Task InitializeRawM3u8AccumulatorAsync(string file, string rawM3u8)
+    {
+        var initialContent = NormalizeRawM3u8(rawM3u8);
+        var shouldWriteInitialContent = true;
+
+        if (File.Exists(file))
+        {
+            var fileContent = await File.ReadAllTextAsync(file, Encoding.UTF8);
+            if (ParseRawM3u8(fileContent).Segments.Count > 0)
+            {
+                initialContent = fileContent;
+                shouldWriteInitialContent = false;
+            }
+        }
+
+        var parsed = ParseRawM3u8(initialContent);
+        if (parsed.Segments.Count == 0)
+            return;
+
+        rawM3u8Content = initialContent;
+        rawM3u8EndListWritten = parsed.HasEndList;
+        rawM3u8SegmentIds.Clear();
+        rawM3u8StateLines.Clear();
+        CollectRawM3u8StateLines(initialContent);
+
+        foreach (var segment in parsed.Segments)
+        {
+            rawM3u8SegmentIds.Add(segment.Id);
+        }
+
+        if (shouldWriteInitialContent)
+        {
+            await File.WriteAllTextAsync(file, initialContent + Environment.NewLine, Encoding.UTF8);
+            rawM3u8Content += Environment.NewLine;
+        }
+    }
+
+    private List<string> FilterRawM3u8SegmentBlockLines(IEnumerable<string> blockLines)
+    {
+        var filteredLines = new List<string>();
+
+        foreach (var line in blockLines)
+        {
+            if (IsRawM3u8StateLine(line) && !rawM3u8StateLines.Add(line))
+                continue;
+
+            filteredLines.Add(line);
+        }
+
+        return filteredLines;
+    }
+
+    private string BuildRawM3u8AppendText(IReadOnlyList<string> appendedLines)
+    {
+        var builder = new StringBuilder();
+        if (rawM3u8Content is { Length: > 0 } && !rawM3u8Content.EndsWith('\n') && !rawM3u8Content.EndsWith('\r'))
+        {
+            builder.AppendLine();
+        }
+
+        builder.AppendJoin(Environment.NewLine, appendedLines);
+        builder.AppendLine();
+        return builder.ToString();
+    }
+
+    private void CollectRawM3u8StateLines(string rawM3u8)
+    {
+        foreach (var line in ReadRawM3u8Lines(rawM3u8))
+        {
+            if (IsRawM3u8StateLine(line))
+                rawM3u8StateLines.Add(line);
+        }
+    }
+
+    private static RawM3u8ParseResult ParseRawM3u8(string rawM3u8)
+    {
+        if (!LooksLikeMediaPlaylist(rawM3u8))
+            return new RawM3u8ParseResult([], false);
+
+        var segments = new List<RawM3u8SegmentBlock>();
+        var blockLines = new List<string>();
+        var hasMediaSequence = false;
+        var nextSequence = 0L;
+        var hasEndList = false;
+
+        foreach (var line in ReadRawM3u8Lines(rawM3u8))
+        {
+            if (line.StartsWith("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal))
+            {
+                var sequenceText = line["#EXT-X-MEDIA-SEQUENCE:".Length..].Trim();
+                if (long.TryParse(sequenceText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sequence))
+                {
+                    nextSequence = sequence;
+                    hasMediaSequence = true;
+                }
+                continue;
+            }
+
+            if (line.StartsWith("#EXT-X-ENDLIST", StringComparison.Ordinal))
+            {
+                hasEndList = true;
+                continue;
+            }
+
+            if (IsRawM3u8SegmentBlockLine(line))
+            {
+                blockLines.Add(line);
+                continue;
+            }
+
+            if (line.StartsWith('#'))
+            {
+                if (blockLines.Count > 0)
+                    blockLines.Add(line);
+                continue;
+            }
+
+            blockLines.Add(line);
+            var segmentId = hasMediaSequence
+                ? $"seq:{nextSequence.ToString(CultureInfo.InvariantCulture)}"
+                : $"uri:{line}";
+            segments.Add(new RawM3u8SegmentBlock(segmentId, [.. blockLines]));
+            blockLines.Clear();
+
+            if (hasMediaSequence)
+                nextSequence++;
+        }
+
+        return new RawM3u8ParseResult(segments, hasEndList);
+    }
+
+    private static bool LooksLikeMediaPlaylist(string rawM3u8)
+    {
+        if (rawM3u8.Contains("#EXT-X-STREAM-INF", StringComparison.Ordinal))
+            return false;
+
+        return rawM3u8.Contains("#EXTINF", StringComparison.Ordinal)
+               || rawM3u8.Contains("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal)
+               || rawM3u8.Contains("#EXT-X-TARGETDURATION:", StringComparison.Ordinal);
+    }
+
+    private static bool IsRawM3u8StateLine(string line)
+    {
+        return line.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal);
+    }
+
+    private static bool IsRawM3u8SegmentBlockLine(string line)
+    {
+        return line.StartsWith("#EXTINF", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-BYTERANGE:", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-PROGRAM-DATE-TIME:", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-DISCONTINUITY", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-DATERANGE:", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-GAP", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-BITRATE:", StringComparison.Ordinal)
+               || line.StartsWith("#EXT-X-PART:", StringComparison.Ordinal)
+               || IsRawM3u8StateLine(line);
+    }
+
+    private static string NormalizeRawM3u8(string rawM3u8)
+    {
+        return string.Join(Environment.NewLine, ReadRawM3u8Lines(rawM3u8));
+    }
+
+    private static IEnumerable<string> ReadRawM3u8Lines(string rawM3u8)
+    {
+        using var reader = new StringReader(rawM3u8);
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            line = line.Trim();
+            if (line.Length == 0)
+                continue;
+
+            yield return line;
         }
     }
 
@@ -1172,6 +1407,8 @@ internal class SimpleLiveRecordManager2
             var saveName = DownloaderConfig.MyOptions.SaveName ?? DateTime.Now.ToString("yyyyMMddHHmmss");
             await StreamingUtil.WriteMasterListAsync(SelectedSteams, saveName, saveDir);
         }*/
+
+        await UpdateRawM3u8Async();
 
         var progress = CustomAnsiConsole.Console.Progress().AutoClear(true);
         progress.AutoRefresh = DownloaderConfig.MyOptions.LogLevel != LogLevel.OFF;

@@ -53,6 +53,7 @@ This fork extends [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 
 | Option | Description |
 |--------|-------------|
 | `--live-host-mirror <HOST>` | Extra mirror host(s) for live segments: fetch concurrently from the primary URL and mirrors; **first successful response wins**. Repeatable; accepts `hostname`, `host:port`, or full `http(s)://` URL. |
+| `--live-keep-m3u8-updated` | Keep appending source playlist updates to `raw.m3u8` in the temp directory while recording live; preserve the initial playlist header and exclude auto-filled gap segments. |
 | `--live-fill-segments-gap` | When the media playlist has sequence gaps, **auto-fill** missing segments by predictable numeric naming (default: on). Gap fill runs only if the initial media playlist has identical URL query strings across segments. |
 | `--live-fill-segments-gap-max <NUM>` | Max segments to fill per gap-fill pass. When omitted, defaults to `max(1, 60 ÷ refresh interval in seconds)`, where the interval is derived from the M3U8 playlist (roughly half the sum of segment durations in that refresh, minus 2s), or overridden by `--live-wait-time`. |
 | `--live-restart-on-ext-map-change` | On `EXT-X-MAP` (init segment) change, **finalize current output and restart** with the new init segment (default: on). Set to `false` to stop recording instead (closer to legacy upstream behavior). |
@@ -157,6 +158,7 @@ Options:
   --live-record-limit <HH:mm:ss>                          Recording time limit when recording live
   --live-wait-time <SEC>                                  Manually set the live playlist refresh interval
   --live-take-count <NUM>                                 Manually set the number of segments downloaded for the first time when recording live [default: 16]
+  --live-keep-m3u8-updated                                Keep appending source playlist updates to raw.m3u8 in the temp directory while recording live; preserve the initial playlist header and exclude auto-filled gap segments [default: False]
   --live-fill-segments-gap                                Auto-fill missing segments by predictable numeric naming pattern when the live playlist refreshes with gaps [default: True]
   --live-fill-segments-gap-max <NUM>                      Maximum number of missing segments allowed when auto-filling segment gaps during live recording
   --live-restart-on-ext-map-change                        When EXT-X-MAP changes during live recording, finish the current output and restart recording with the new init segment; disable to stop recording instead [default: True]
@@ -332,4 +334,3 @@ From v0.1.8, you can set the environment variable `RE_LIVE_PIPE_OPTIONS` to chan
 Thanks to upstream author nilaoda for the original project.
 
 <a href="https://www.buymeacoffee.com/nilaoda" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
-

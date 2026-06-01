@@ -97,6 +97,7 @@ public static class ResString
     public static string cmd_taskStartAt => GetText("cmd_taskStartAt");
     public static string cmd_liveWaitTime => GetText("cmd_liveWaitTime");
     public static string cmd_liveTakeCount => GetText("cmd_liveTakeCount");
+    public static string cmd_liveKeepM3u8Updated => GetText("cmd_liveKeepM3u8Updated");
     public static string cmd_liveHostMirror => GetText("cmd_liveHostMirror");
     public static string cmd_liveFixVttByAudio => GetText("cmd_liveFixVttByAudio");
     public static string cmd_liveFillSegmentsGap => GetText("cmd_liveFillSegmentsGap");

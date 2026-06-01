@@ -499,6 +499,12 @@ internal static class StaticText
             zhTW: "手動設置錄製直播時首次獲取分片的數量",
             enUS: "Manually set the number of segments downloaded for the first time when recording live"
         ),
+        ["cmd_liveKeepM3u8Updated"] = new TextContainer
+        (
+            zhCN: "录制直播时持续更新 raw.m3u8，不包含补洞内容",
+            zhTW: "錄製直播時持續更新 raw.m3u8，不包含補洞內容",
+            enUS: "Keep raw.m3u8 updated while recording live, excluding filled gap content"
+        ),
         ["cmd_liveHostMirror"] = new TextContainer
         (
             zhCN: "录制直播时额外镜像 host；每个分片同时从主 URL 与各镜像拉取，采用最先成功完成的副本。可重复指定。支持 hostname、host:port 或完整 http(s) URL。",
