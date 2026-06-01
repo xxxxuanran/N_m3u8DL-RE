@@ -12,19 +12,19 @@ If you encounter a bug, please confirm you are on the latest [Release](https://g
 
 ## Download
 
-Get prebuilt packages from [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases). Pushing a tag such as `v0.6.1-beta` triggers GitHub Actions to build and publish artifacts for all supported platforms.
+Get prebuilt packages from [Releases](https://github.com/xxxxuanran/N_m3u8DL-RE/releases). Pushing a tag such as `v0.6.2-beta` triggers GitHub Actions to build and publish artifacts for all supported platforms.
 
 | Platform | Example filename |
 |----------|------------------|
-| Windows x64 | `N_m3u8DL-RE_v0.6.1-beta_win-x64_*.zip` |
-| Windows arm64 | `N_m3u8DL-RE_v0.6.1-beta_win-arm64_*.zip` |
-| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.1-beta_win-NT6.0-x86_*.zip` |
-| Linux x64 (static musl) | `N_m3u8DL-RE_v0.6.1-beta_linux-x64_*.tar.gz` |
-| Linux arm64 (static musl) | `N_m3u8DL-RE_v0.6.1-beta_linux-arm64_*.tar.gz` |
-| macOS x64 | `N_m3u8DL-RE_v0.6.1-beta_osx-x64_*.tar.gz` |
-| macOS arm64 | `N_m3u8DL-RE_v0.6.1-beta_osx-arm64_*.tar.gz` |
+| Windows x64 | `N_m3u8DL-RE_v0.6.2-beta_win-x64_*.zip` |
+| Windows arm64 | `N_m3u8DL-RE_v0.6.2-beta_win-arm64_*.zip` |
+| Windows x86 (NT 6.0+) | `N_m3u8DL-RE_v0.6.2-beta_win-NT6.0-x86_*.zip` |
+| Linux x64 (static musl) | `N_m3u8DL-RE_v0.6.2-beta_linux-x64_*.tar.gz` |
+| Linux arm64 (static musl) | `N_m3u8DL-RE_v0.6.2-beta_linux-arm64_*.tar.gz` |
+| macOS x64 | `N_m3u8DL-RE_v0.6.2-beta_osx-x64_*.tar.gz` |
+| macOS arm64 | `N_m3u8DL-RE_v0.6.2-beta_osx-arm64_*.tar.gz` |
 
-Linux builds are fully static (musl). A release build shows e.g. `N_m3u8DL-RE (Beta version) 20260531+v0.6.1-beta`; local builds off a non-tag commit may show `yyyyMMdd+<commit>`.
+Linux builds are fully static (musl). A release build shows e.g. `N_m3u8DL-RE (Beta version) 20260601+v0.6.2-beta`; local builds off a non-tag commit may show `yyyyMMdd+<commit>`.
 
 ---
 
@@ -53,7 +53,8 @@ This fork extends [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 
 | Option | Description |
 |--------|-------------|
 | `--live-host-mirror <HOST>` | Extra mirror host(s) for live segments: fetch concurrently from the primary URL and mirrors; **first successful response wins**. Repeatable; accepts `hostname`, `host:port`, or full `http(s)://` URL. |
-| `--live-keep-m3u8-updated` | Keep appending source playlist updates to `raw.m3u8` in the temp directory while recording live; preserve the initial playlist header and exclude auto-filled gap segments. |
+| `--live-from-start` | When recording live, best-effort backfill predictable segments toward the start; immediately download each generated full segment until a backfill download fails. |
+| `--live-keep-m3u8-updated` | Keep `raw.m3u8` updated while recording live, excluding filled gap content. |
 | `--live-fill-segments-gap` | When the media playlist has sequence gaps, **auto-fill** missing segments by predictable numeric naming (default: on). Gap fill runs only if the initial media playlist has identical URL query strings across segments. |
 | `--live-fill-segments-gap-max <NUM>` | Max segments to fill per gap-fill pass. When omitted, defaults to `max(1, min(60, ceil(60/wait_time)))`, where `wait_time` is the refresh interval in seconds and can be overridden by `--live-wait-time`. |
 | `--live-restart-on-ext-map-change` | On `EXT-X-MAP` (init segment) change, **finalize current output and restart** with the new init segment (default: on). Set to `false` to stop recording instead (closer to legacy upstream behavior). |
@@ -76,11 +77,11 @@ This fork extends [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) 
 - Improve mux output naming and finalize rename safety.
 - Gate live segment gap fill on **consistent URL query** checked at the first media playlist.
 
-> From `N_m3u8DL-RE --help` on a local win-x64 Native AOT build (`artifact-x64-publish`).
+> From `N_m3u8DL-RE --help` on a win-x64 Native AOT release build.
 
 ```
 Description:
-  N_m3u8DL-RE (Beta version) 20260531+v0.6.1-beta
+  N_m3u8DL-RE (Beta version) 20260601+v0.6.2-beta
 
 Usage:
   N_m3u8DL-RE <input> [options]
@@ -158,7 +159,8 @@ Options:
   --live-record-limit <HH:mm:ss>                          Recording time limit when recording live
   --live-wait-time <SEC>                                  Manually set the live playlist refresh interval
   --live-take-count <NUM>                                 Manually set the number of segments downloaded for the first time when recording live [default: 16]
-  --live-keep-m3u8-updated                                Keep appending source playlist updates to raw.m3u8 in the temp directory while recording live; preserve the initial playlist header and exclude auto-filled gap segments [default: False]
+  --live-from-start                                       When recording live, best-effort backfill predictable segments toward the start; immediately download each generated full segment until a backfill download fails [default: False]
+  --live-keep-m3u8-updated                                Keep raw.m3u8 updated while recording live, excluding filled gap content [default: False]
   --live-fill-segments-gap                                Auto-fill missing segments by predictable numeric naming pattern when the live playlist refreshes with gaps [default: True]
   --live-fill-segments-gap-max <NUM>                      Max missing segments to fill per gap; default max(1, min(60, ceil(60/wait_time))), where wait_time is the refresh interval in seconds (overridable via --live-wait-time)
   --live-restart-on-ext-map-change                        When EXT-X-MAP changes during live recording, finish the current output and restart recording with the new init segment; disable to stop recording instead [default: True]
