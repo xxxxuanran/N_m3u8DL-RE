@@ -7,8 +7,8 @@
       <_BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_BuildInfoFile>
     </PropertyGroup>
 
-    <Exec Condition="'$(OS)' == 'Windows_NT'" Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(_BuildInfoScript)&quot; -OutputFile &quot;$(_BuildInfoFile)&quot; -ReleaseTag &quot;$(ReleaseTag)&quot; -VersionInfoSuffix &quot;$(VersionInfoSuffix)&quot;" />
-    <Exec Condition="'$(OS)' != 'Windows_NT'" Command="sh &quot;$(_BuildInfoScriptSh)&quot; -OutputFile &quot;$(_BuildInfoFile)&quot; -ReleaseTag &quot;$(ReleaseTag)&quot; -VersionInfoSuffix &quot;$(VersionInfoSuffix)&quot;" />
+    <Exec Condition="'$(OS)' == 'Windows_NT'" Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(_BuildInfoScript)&quot; -OutputFile &quot;$(_BuildInfoFile)&quot; -ReleaseTag &quot;$(ReleaseTag)&quot; -VersionInfoSuffix &quot;$(VersionInfoSuffix)&quot; -UpdateRepository &quot;$(UpdateRepository)&quot;" />
+    <Exec Condition="'$(OS)' != 'Windows_NT'" Command="sh &quot;$(_BuildInfoScriptSh)&quot; -OutputFile &quot;$(_BuildInfoFile)&quot; -ReleaseTag &quot;$(ReleaseTag)&quot; -VersionInfoSuffix &quot;$(VersionInfoSuffix)&quot; -UpdateRepository &quot;$(UpdateRepository)&quot;" />
 
     <ItemGroup>
       <Compile Include="$(_BuildInfoFile)" />

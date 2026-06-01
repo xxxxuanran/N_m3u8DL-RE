@@ -489,9 +489,15 @@ internal class Program
         {
             var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version!;
             string nowVer = $"v{ver.Major}.{ver.Minor}.{ver.Build}";
-            string redirctUrl = await Get302Async("https://github.com/nilaoda/N_m3u8DL-RE/releases/latest");
-            string latestVer = redirctUrl.Replace("https://github.com/nilaoda/N_m3u8DL-RE/releases/tag/", "");
-            if (!latestVer.StartsWith(nowVer) && !latestVer.StartsWith("https"))
+            var updateRepository = CommandInvoker.UPDATE_REPOSITORY;
+            if (string.IsNullOrWhiteSpace(updateRepository)) return;
+
+            var releaseTagUrlPrefix = $"https://github.com/{updateRepository}/releases/tag/";
+            string redirectUrl = await Get302Async($"https://github.com/{updateRepository}/releases/latest");
+            if (!redirectUrl.StartsWith(releaseTagUrlPrefix, StringComparison.OrdinalIgnoreCase)) return;
+
+            string latestVer = redirectUrl[releaseTagUrlPrefix.Length..];
+            if (!latestVer.StartsWith(nowVer, StringComparison.OrdinalIgnoreCase))
             {
                 Console.Title = $"{ResString.newVersionFound} {latestVer}";
                 Logger.InfoMarkUp($"[cyan]{ResString.newVersionFound}[/] [red]{latestVer}[/]");

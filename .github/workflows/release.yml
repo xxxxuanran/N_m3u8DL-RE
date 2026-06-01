@@ -91,7 +91,7 @@ jobs:
       - run: powershell -Command "(Get-Content src/N_m3u8DL-RE/N_m3u8DL-RE.csproj) -replace '<TargetFramework>.*</TargetFramework>', '<TargetFramework>net10.0-windows</TargetFramework>' | Set-Content src/N_m3u8DL-RE/N_m3u8DL-RE.csproj"
       - run: dotnet add src/N_m3u8DL-RE/N_m3u8DL-RE.csproj package YY-Thunks --version 1.1.4
       - run: dotnet add src/N_m3u8DL-RE/N_m3u8DL-RE.csproj package VC-LTL --version 5.1.1
-      - run: dotnet publish src/N_m3u8DL-RE -p:TargetPlatformMinVersion=6.0 -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r win-x86 -c Release -o artifact
+      - run: dotnet publish src/N_m3u8DL-RE -p:TargetPlatformMinVersion=6.0 -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -p:UpdateRepository=${{ github.repository }} -r win-x86 -c Release -o artifact
 
       - name: Package [win-x86]
         run: |
@@ -129,7 +129,7 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
 
-      - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r ${{ matrix.rid }} -c Release -o artifact
+      - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -p:UpdateRepository=${{ github.repository }} -r ${{ matrix.rid }} -c Release -o artifact
 
       - name: Package [${{ matrix.artifact }}]
         run: |
@@ -164,7 +164,7 @@ jobs:
   #       with:
   #         dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
 
-  #     - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r linux-bionic-x64 -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true -c Release -o artifact
+  #     - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -p:UpdateRepository=${{ github.repository }} -r linux-bionic-x64 -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true -c Release -o artifact
 
   #     - name: Package [android-bionic-x64]
   #       run: |
@@ -199,7 +199,7 @@ jobs:
   #       with:
   #         dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
 
-  #     - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r linux-bionic-arm64 -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true -c Release -o artifact
+  #     - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -p:UpdateRepository=${{ github.repository }} -r linux-bionic-arm64 -p:DisableUnsupportedError=true -p:PublishAotUsingRuntimePack=true -c Release -o artifact
 
   #     - name: Package [android-bionic-arm64]
   #       run: |
@@ -249,12 +249,14 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           VERSION_INFO_SUFFIX: ${{ needs.prepare.outputs.version_info_suffix }}
+          UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
           docker run --rm \
             -v "$PWD:/workspace" \
             -w /workspace \
             -e VERSION \
             -e VERSION_INFO_SUFFIX \
+            -e UPDATE_REPOSITORY \
             ${{ matrix.image }} \
             sh -c '
               set -eu
@@ -262,6 +264,7 @@ jobs:
               dotnet publish src/N_m3u8DL-RE \
                 -p:Version="$VERSION" \
                 -p:VersionInfoSuffix="$VERSION_INFO_SUFFIX" \
+                -p:UpdateRepository="$UPDATE_REPOSITORY" \
                 -r ${{ matrix.rid }} \
                 -c Release \
                 -o /workspace/artifact
@@ -302,7 +305,7 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
 
-      - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -r ${{ matrix.rid }} -c Release -o artifact
+      - run: dotnet publish src/N_m3u8DL-RE -p:Version=${{ needs.prepare.outputs.version }} -p:VersionInfoSuffix=${{ needs.prepare.outputs.version_info_suffix }} -p:UpdateRepository=${{ github.repository }} -r ${{ matrix.rid }} -c Release -o artifact
 
       - name: Package [${{ matrix.artifact }}]
         run: |

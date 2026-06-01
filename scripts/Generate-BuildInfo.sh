@@ -4,12 +4,14 @@ set -eu
 OUTPUT_FILE=""
 RELEASE_TAG=""
 VERSION_INFO_SUFFIX=""
+UPDATE_REPOSITORY=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     -OutputFile) OUTPUT_FILE="$2"; shift 2 ;;
     -ReleaseTag) RELEASE_TAG="$2"; shift 2 ;;
     -VersionInfoSuffix) VERSION_INFO_SUFFIX="$2"; shift 2 ;;
+    -UpdateRepository) UPDATE_REPOSITORY="$2"; shift 2 ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 1
@@ -22,14 +24,62 @@ if [ -z "$OUTPUT_FILE" ]; then
   exit 1
 fi
 
+github_slug_from_value() {
+  value=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s#/$##; s#\.git$##')
+  if [ -z "$value" ]; then
+    return
+  fi
+
+  if printf '%s' "$value" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    printf '%s\n' "$value"
+    return
+  fi
+
+  slug=$(printf '%s' "$value" | sed -nE 's#^https?://([^/]+@)?github\.com/([^/]+)/([^/]+)$#\2/\3#p')
+  if [ -n "$slug" ]; then
+    printf '%s\n' "$slug"
+    return
+  fi
+
+  slug=$(printf '%s' "$value" | sed -nE 's#^(ssh://)?git@github\.com[:/]([^/]+)/([^/]+)$#\2/\3#p')
+  if [ -n "$slug" ]; then
+    printf '%s\n' "$slug"
+  fi
+}
+
+resolve_update_repository() {
+  slug=$(github_slug_from_value "$UPDATE_REPOSITORY")
+  if [ -n "$slug" ]; then
+    printf '%s\n' "$slug"
+    return
+  fi
+
+  slug=$(github_slug_from_value "${GITHUB_REPOSITORY:-}")
+  if [ -n "$slug" ]; then
+    printf '%s\n' "$slug"
+    return
+  fi
+
+  origin_url=$(git remote get-url origin 2>/dev/null || true)
+  slug=$(github_slug_from_value "$origin_url")
+  if [ -n "$slug" ]; then
+    printf '%s\n' "$slug"
+    return
+  fi
+
+  printf '%s\n' "xxxxuanran/N_m3u8DL-RE"
+}
+
 if [ -z "$VERSION_INFO_SUFFIX" ]; then
   SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
   VERSION_INFO_SUFFIX=$(sh "$SCRIPT_DIR/Get-VersionInfoSuffix.sh" -ReleaseTag "$RELEASE_TAG")
 fi
 
+UPDATE_REPOSITORY=$(resolve_update_repository)
 version_info="N_m3u8DL-RE (Beta version) $VERSION_INFO_SUFFIX"
 escaped=$(printf '%s' "$version_info" | sed 's/\\/\\\\/g; s/"/\\"/g')
 escaped_suffix=$(printf '%s' "$VERSION_INFO_SUFFIX" | sed 's/\\/\\\\/g; s/"/\\"/g')
+escaped_update_repository=$(printf '%s' "$UPDATE_REPOSITORY" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 cat > "$OUTPUT_FILE" <<EOF
@@ -43,5 +93,6 @@ namespace N_m3u8DL_RE.CommandLine;
 internal static partial class CommandInvoker
 {
     public const string VERSION_INFO = "$escaped";
+    public const string UPDATE_REPOSITORY = "$escaped_update_repository";
 }
 EOF
