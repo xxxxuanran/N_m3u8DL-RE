@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text;
 using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.Log;

@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Parser.Constants;
+namespace N_m3u8DL_RE.Parser.Constants;
 
 internal static class DASHTags
 {

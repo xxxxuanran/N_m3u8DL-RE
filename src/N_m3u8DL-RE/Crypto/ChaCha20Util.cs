@@ -1,4 +1,4 @@
-﻿using CSChaCha20;
+using CSChaCha20;
 
 namespace N_m3u8DL_RE.Crypto;
 

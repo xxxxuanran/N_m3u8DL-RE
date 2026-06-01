@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 
 namespace N_m3u8DL_RE.CommandLine;
 

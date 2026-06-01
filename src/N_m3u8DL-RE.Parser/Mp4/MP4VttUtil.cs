@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Entity;
+using N_m3u8DL_RE.Common.Entity;
 using System.Text;
 
 namespace Mp4SubtitleParser;

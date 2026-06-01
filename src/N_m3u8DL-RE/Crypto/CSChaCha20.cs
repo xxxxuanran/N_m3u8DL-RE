@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2015, 2018 Scott Bennett
  *           (c) 2018-2021 Kaarlo Räihä
  *

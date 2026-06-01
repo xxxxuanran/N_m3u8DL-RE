@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Entity;
+namespace N_m3u8DL_RE.Entity;
 
 public class CustomRange
 {

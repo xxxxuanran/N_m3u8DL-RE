@@ -934,7 +934,7 @@ internal class SimpleLiveRecordManager2
             return;
 
         var appendText = BuildRawM3u8AppendText(appendedLines);
-        await File.AppendAllTextAsync(file, appendText, Encoding.UTF8);
+        await File.AppendAllTextAsync(file, appendText, GlobalUtil.Utf8NoBom);
         rawM3u8Content += appendText;
     }
 
@@ -970,7 +970,7 @@ internal class SimpleLiveRecordManager2
 
         if (shouldWriteInitialContent)
         {
-            await File.WriteAllTextAsync(file, initialContent + Environment.NewLine, Encoding.UTF8);
+            await File.WriteAllTextAsync(file, initialContent + Environment.NewLine, GlobalUtil.Utf8NoBom);
             rawM3u8Content += Environment.NewLine;
         }
     }

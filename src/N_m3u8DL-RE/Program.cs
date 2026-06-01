@@ -6,7 +6,6 @@ using N_m3u8DL_RE.Parser;
 using Spectre.Console;
 using N_m3u8DL_RE.Common.Resource;
 using N_m3u8DL_RE.Common.Log;
-using System.Text;
 using N_m3u8DL_RE.Common.Util;
 using N_m3u8DL_RE.Processor;
 using N_m3u8DL_RE.Config;
@@ -478,7 +477,7 @@ internal class Program
             foreach (var item in extractor.RawFiles)
             {
                 var file = Path.Combine(tmpDir, item.Key);
-                if (!File.Exists(file)) await File.WriteAllTextAsync(file, item.Value, Encoding.UTF8);
+                if (!File.Exists(file)) await File.WriteAllTextAsync(file, item.Value, GlobalUtil.Utf8NoBom);
             }
         }
     }

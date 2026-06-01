@@ -1,4 +1,4 @@
-﻿using Spectre.Console;
+using Spectre.Console;
 
 namespace N_m3u8DL_RE.Entity;
 

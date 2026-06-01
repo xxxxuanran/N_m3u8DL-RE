@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 
 namespace N_m3u8DL_RE.Crypto;
 

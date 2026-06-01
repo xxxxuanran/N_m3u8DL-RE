@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Util;
+using N_m3u8DL_RE.Common.Util;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Collections.Concurrent;

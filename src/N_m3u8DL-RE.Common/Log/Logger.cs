@@ -1,3 +1,4 @@
+using N_m3u8DL_RE.Common.Util;
 using Spectre.Console;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -62,7 +63,7 @@ public static partial class Logger
                           + "Task Start: " + now.ToString("yyyy/MM/dd HH:mm:ss") + Environment.NewLine
                           + "Task CommandLine: " + Environment.CommandLine;
             init += $"{Environment.NewLine}{Environment.NewLine}";
-            File.WriteAllText(LogFilePath, init, Encoding.UTF8);
+            File.WriteAllText(LogFilePath, init, GlobalUtil.Utf8NoBom);
         }
         catch (Exception ex)
         {
@@ -96,7 +97,7 @@ public static partial class Logger
             {
                 // 进入写入
                 LogWriteLock.EnterWriteLock();
-                using (StreamWriter sw = File.AppendText(LogFilePath))
+                using (var sw = new StreamWriter(LogFilePath, append: true, GlobalUtil.Utf8NoBom))
                 {
                     sw.WriteLine(plain);
                 }
@@ -224,9 +225,9 @@ public static partial class Logger
         {
             // 进入写入
             LogWriteLock.EnterWriteLock();
-            using (StreamWriter sw = File.AppendText(LogFilePath))
+            using (var sw = new StreamWriter(LogFilePath, append: true, GlobalUtil.Utf8NoBom))
             {
-                sw.WriteLine(plain, Encoding.UTF8);
+                sw.WriteLine(plain);
             }
         }
         finally

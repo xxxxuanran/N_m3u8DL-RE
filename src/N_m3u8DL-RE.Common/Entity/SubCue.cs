@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Common.Entity;
+namespace N_m3u8DL_RE.Common.Entity;
 
 public class SubCue
 {

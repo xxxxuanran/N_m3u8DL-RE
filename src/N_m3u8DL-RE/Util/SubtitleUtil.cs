@@ -1,4 +1,4 @@
-﻿using N_m3u8DL_RE.Common.Entity;
+using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Common.Resource;
 

@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace N_m3u8DL_RE.Common.Entity;

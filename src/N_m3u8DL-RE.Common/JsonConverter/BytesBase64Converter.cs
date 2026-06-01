@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace N_m3u8DL_RE.Common.JsonConverter;

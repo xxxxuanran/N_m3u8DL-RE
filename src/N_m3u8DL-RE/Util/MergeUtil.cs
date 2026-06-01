@@ -1,4 +1,5 @@
-using N_m3u8DL_RE.Common.Log;
+﻿using N_m3u8DL_RE.Common.Log;
+using N_m3u8DL_RE.Common.Util;
 using N_m3u8DL_RE.Entity;
 using Spectre.Console;
 using System.Diagnostics;
@@ -114,7 +115,7 @@ internal static class MergeUtil
             // 使用 concat demuxer合并
             var text = string.Join(Environment.NewLine, files.Select(f => $"file '{f}'"));
             var tempFile = Path.GetTempFileName();
-            File.WriteAllText(tempFile, text);
+            File.WriteAllText(tempFile, text, GlobalUtil.Utf8NoBom);
             command.Append($" -f concat -safe 0 -i \"{tempFile}");
         }
         else

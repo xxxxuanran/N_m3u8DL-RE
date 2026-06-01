@@ -1,4 +1,4 @@
-﻿namespace N_m3u8DL_RE.Common.Resource;
+namespace N_m3u8DL_RE.Common.Resource;
 
 internal class TextContainer
 {

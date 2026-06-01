@@ -1,6 +1,7 @@
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.JsonConverter;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -8,6 +9,10 @@ namespace N_m3u8DL_RE.Common.Util;
 
 public static class GlobalUtil
 {
+    /// <summary>
+    /// UTF-8 without BOM; use for all text file writes (<see cref="Encoding.UTF8"/> emits BOM on .NET 10).
+    /// </summary>
+    public static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     private static readonly JsonSerializerOptions Options = new()
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,

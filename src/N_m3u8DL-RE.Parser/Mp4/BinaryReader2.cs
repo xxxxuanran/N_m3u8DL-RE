@@ -1,4 +1,4 @@
-﻿namespace Mp4SubtitleParser;
+namespace Mp4SubtitleParser;
 
 // make BinaryReader in Big Endian
 class BinaryReader2 : BinaryReader

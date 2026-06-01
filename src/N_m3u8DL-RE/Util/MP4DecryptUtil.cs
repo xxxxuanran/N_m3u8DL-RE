@@ -1,4 +1,4 @@
-﻿using Mp4SubtitleParser;
+using Mp4SubtitleParser;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Common.Resource;
 using System.Diagnostics;
