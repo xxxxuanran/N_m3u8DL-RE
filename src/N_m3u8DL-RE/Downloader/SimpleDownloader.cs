@@ -176,24 +176,11 @@ internal class SimpleDownloader : IDownloader
                 lastException = finished.Exception.GetBaseException();
         }
 
-        foreach (var e in entries)
-        {
-            if (e.TmpPath != winnerTmp)
-            {
-                try { await e.Task.ConfigureAwait(false); } catch { /* ignore */ }
-                try
-                {
-                    if (File.Exists(e.TmpPath))
-                        File.Delete(e.TmpPath);
-                }
-                catch { /* ignore */ }
-            }
-
-            e.Cts.Dispose();
-        }
-
         if (winnerResult == null)
+        {
+            await CleanupHostRaceDownloadsAsync(entries, winnerTmp).ConfigureAwait(false);
             throw lastException ?? new InvalidOperationException("All host mirrors failed");
+        }
 
         if (!string.Equals(winnerTmp, path, StringComparison.OrdinalIgnoreCase))
         {
@@ -211,7 +198,34 @@ internal class SimpleDownloader : IDownloader
             Logger.WarnMarkUp($"[grey]race winner: {winnerHostForLog.EscapeMarkup()} in file({segmentLabel.EscapeMarkup()})[/]");
         }
 
+        foreach (var e in entries.Where(e => e.TmpPath == winnerTmp))
+            e.Cts.Dispose();
+
+        _ = CleanupHostRaceDownloadsAsync(entries.Where(e => e.TmpPath != winnerTmp).ToList(), winnerTmp);
+
         return winnerResult;
+    }
+
+    private static async Task CleanupHostRaceDownloadsAsync(
+        IEnumerable<(Task<DownloadResult> Task, string TmpPath, CancellationTokenSource Cts, string CandidateUrl)> entries,
+        string? winnerTmp)
+    {
+        foreach (var e in entries)
+        {
+            try { await e.Task.ConfigureAwait(false); } catch { /* ignore */ }
+
+            if (e.TmpPath != winnerTmp)
+            {
+                try
+                {
+                    if (File.Exists(e.TmpPath))
+                        File.Delete(e.TmpPath);
+                }
+                catch { /* ignore */ }
+            }
+
+            e.Cts.Dispose();
+        }
     }
 
     private async Task<(string des, DownloadResult? dResult)> DownClipAsync(string url, string path, SpeedContainer speedContainer, long? fromPosition, long? toPosition, Dictionary<string, string>? headers = null, int retryCount = 3, CancellationToken cancellationToken = default)
