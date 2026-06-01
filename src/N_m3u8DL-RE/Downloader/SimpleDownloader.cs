@@ -21,10 +21,10 @@ internal class SimpleDownloader : IDownloader
         DownloaderConfig = config;
     }
 
-    public async Task<DownloadResult?> DownloadSegmentAsync(MediaSegment segment, string savePath, SpeedContainer speedContainer, Dictionary<string, string>? headers = null)
+    public async Task<DownloadResult?> DownloadSegmentAsync(MediaSegment segment, string savePath, SpeedContainer speedContainer, Dictionary<string, string>? headers = null, int? retryCount = null, CancellationToken cancellationToken = default)
     {
         var url = segment.Url;
-        var (des, dResult) = await DownClipAsync(url, savePath, speedContainer, segment.StartRange, segment.StopRange, headers, DownloaderConfig.MyOptions.DownloadRetryCount);
+        var (des, dResult) = await DownClipAsync(url, savePath, speedContainer, segment.StartRange, segment.StopRange, headers, retryCount ?? DownloaderConfig.MyOptions.DownloadRetryCount, cancellationToken);
         if (dResult is { Success: true } && dResult.ActualFilePath != des)
         {
             switch (segment.EncryptInfo.Method)
@@ -214,13 +214,14 @@ internal class SimpleDownloader : IDownloader
         return winnerResult;
     }
 
-    private async Task<(string des, DownloadResult? dResult)> DownClipAsync(string url, string path, SpeedContainer speedContainer, long? fromPosition, long? toPosition, Dictionary<string, string>? headers = null, int retryCount = 3)
+    private async Task<(string des, DownloadResult? dResult)> DownClipAsync(string url, string path, SpeedContainer speedContainer, long? fromPosition, long? toPosition, Dictionary<string, string>? headers = null, int retryCount = 3, CancellationToken cancellationToken = default)
     {
         CancellationTokenSource? cancellationTokenSource = null;
         retry:
         try
         {
-            cancellationTokenSource = new();
+            cancellationToken.ThrowIfCancellationRequested();
+            cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var des = Path.ChangeExtension(path, null);
 
             // 已下载跳过
@@ -265,12 +266,15 @@ internal class SimpleDownloader : IDownloader
         }
         catch (Exception ex)
         {
+            if (cancellationToken.IsCancellationRequested)
+                return default;
+
             Logger.DebugMarkUp($"[grey]{ex.Message.EscapeMarkup()} retryCount: {retryCount}[/]");
             Logger.Debug(url + " " + ex);
             Logger.Extra($"Ah oh!{Environment.NewLine}RetryCount => {retryCount}{Environment.NewLine}Exception  => {ex.Message}{Environment.NewLine}Url        => {url}");
             if (retryCount-- > 0)
             {
-                await Task.Delay(1000);
+                await Task.Delay(1000, cancellationToken);
                 goto retry;
             }
             else

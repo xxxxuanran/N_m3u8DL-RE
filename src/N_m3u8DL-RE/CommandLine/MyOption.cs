@@ -277,6 +277,10 @@ internal class MyOption
     /// </summary>
     public int LiveTakeCount { get; set; }
     /// <summary>
+    /// See: <see cref="CommandInvoker.LiveFromStart"/>.
+    /// </summary>
+    public bool LiveFromStart { get; set; }
+    /// <summary>
     /// See: <see cref="CommandInvoker.LiveKeepM3u8Updated"/>.
     /// </summary>
     public bool LiveKeepM3u8Updated { get; set; }

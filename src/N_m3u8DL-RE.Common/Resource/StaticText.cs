@@ -499,6 +499,12 @@ internal static class StaticText
             zhTW: "手動設置錄製直播時首次獲取分片的數量",
             enUS: "Manually set the number of segments downloaded for the first time when recording live"
         ),
+        ["cmd_liveFromStart"] = new TextContainer
+        (
+            zhCN: "录制直播时，对可预测的分片尽力向前回溯；每生成一个历史分片文件名就立即完整下载，直到回溯下载失败",
+            zhTW: "錄製直播時，對可預測的分片盡力向前回溯；每生成一個歷史分片檔名就立即完整下載，直到回溯下載失敗",
+            enUS: "When recording live, best-effort backfill predictable segments toward the start; immediately download each generated full segment until a backfill download fails"
+        ),
         ["cmd_liveKeepM3u8Updated"] = new TextContainer
         (
             zhCN: "录制直播时持续更新 raw.m3u8，不包含补洞内容",

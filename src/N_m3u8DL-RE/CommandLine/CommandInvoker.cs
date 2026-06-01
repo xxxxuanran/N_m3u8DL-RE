@@ -107,6 +107,7 @@ internal static partial class CommandInvoker
     private static readonly Option<TimeSpan?> LiveRecordLimit = new("--live-record-limit") { HelpName = "HH:mm:ss", Description = ResString.cmd_liveRecordLimit, CustomParser = ParseLiveLimit };
     private static readonly Option<int?> LiveWaitTime = new("--live-wait-time") { HelpName = "SEC", Description = ResString.cmd_liveWaitTime };
     private static readonly Option<int> LiveTakeCount = new("--live-take-count") { HelpName = "NUM", Description = ResString.cmd_liveTakeCount, DefaultValueFactory = _ => 16 };
+    private static readonly Option<bool> LiveFromStart = new Option<bool>("--live-from-start") { Description = ResString.cmd_liveFromStart }.WithDefault(false);
     private static readonly Option<bool> LiveKeepM3u8Updated = new Option<bool>("--live-keep-m3u8-updated") { Description = ResString.cmd_liveKeepM3u8Updated }.WithDefault(false);
     private static readonly Option<bool> LiveFixVttByAudio = new Option<bool>("--live-fix-vtt-by-audio") { Description = ResString.cmd_liveFixVttByAudio }.WithDefault(false);
     private static readonly Option<bool> LiveFillSegmentsGap = new Option<bool>("--live-fill-segments-gap") { Description = ResString.cmd_liveFillSegmentsGap }.WithDefault(true);
@@ -684,6 +685,7 @@ internal static partial class CommandInvoker
             CustomRange = result.GetValue(CustomRange),
             LiveWaitTime = result.GetValue(LiveWaitTime),
             LiveTakeCount = result.GetValue(LiveTakeCount),
+            LiveFromStart = result.GetValue(LiveFromStart),
             LiveKeepM3u8Updated = result.GetValue(LiveKeepM3u8Updated),
             LiveHostMirrors = result.GetValue(LiveHostMirror),
             LiveFillSegmentsGap = result.GetValue(LiveFillSegmentsGap),
@@ -779,7 +781,7 @@ internal static partial class CommandInvoker
             MaxSpeed,
             MuxAfterDone,
             CustomHLSMethod, CustomHLSKey, CustomHLSIv, UseSystemProxy, CustomProxy, ForceIpv4, ForceIpv6, Http10, Http11, Http2, Http2PriorKnowledge, CustomRange, TaskStartAt,
-            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveKeepM3u8Updated, LiveFillSegmentsGap, LiveFillSegmentsGapMax, LiveRestartOnExtMapChange,
+            LivePerformAsVod, LiveRealTimeMerge, LiveKeepSegments, LivePipeMux, LiveFixVttByAudio, LiveHostMirror, LiveRecordLimit, LiveWaitTime, LiveTakeCount, LiveFromStart, LiveKeepM3u8Updated, LiveFillSegmentsGap, LiveFillSegmentsGapMax, LiveRestartOnExtMapChange,
             MuxImports, VideoFilter, AudioFilter, SubtitleFilter, DropVideoFilter, DropAudioFilter, DropSubtitleFilter, AdKeywords, DisableUpdateCheck, AllowHlsMultiExtMap, MoreHelp
         };
 
