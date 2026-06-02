@@ -1410,7 +1410,7 @@ internal class SimpleLiveRecordManager2
                 return;
             }
 
-            if (earliestNumber == null)
+            if (earliestNumber == null || earliestNumber.Value > upper)
             {
                 Logger.InfoMarkUp($"[darkorange3_1]Live from start: no earlier segment available before {firstNumber} for {streamLabel}.[/]");
                 return;
@@ -1833,8 +1833,8 @@ internal class SimpleLiveRecordManager2
     }
 
     /// <summary>
-    /// 阶段 1：指数探测 + 二分，定位 [floor, topAvailableSentinel) 区间内"最低可用"的 segment 编号（即 DVR 窗口的最早可用边界 E0）。
-    /// 假定可用性单调：&gt;= E0 可用、&lt; E0 不可用。探测期间下载到的可用分片全部进缓存，供升序回填复用。
+    /// 阶段 1：指数探测 + 二分缩窗 + 小窗口倒序收尾，定位 [floor, topAvailableSentinel) 区间内"最低可用"的 segment 编号（即 DVR 窗口的最早可用边界 E0）。
+    /// 假定可用性单调：&gt;= E0 可用、&lt; E0 不可用。探测/收尾期间下载到的可用分片全部进缓存，供升序回填复用。
     /// </summary>
     /// <returns>(最早可用编号 E0, 探测中胜出 host 的 URL, 是否改用倒序下载)；
     /// 若 sentinel 之下没有任何可用分片则 E0 为 null；
@@ -1860,6 +1860,17 @@ internal class SimpleLiveRecordManager2
             return winSampleUrls.GetValueOrDefault(bestHost);
         }
 
+        string? RecordWinner(DownloadResult result)
+        {
+            var host = TryParseUrlAuthority(result.RequestUrl)?.Host;
+            if (host != null)
+            {
+                winCounts[host] = winCounts.GetValueOrDefault(host) + 1;
+                winSampleUrls[host] = result.RequestUrl!;
+            }
+            return host;
+        }
+
         async Task<DownloadResult?> ProbeAsync(long number, string phase)
         {
             probeCount++;
@@ -1867,12 +1878,7 @@ internal class SimpleLiveRecordManager2
             var (_, result) = await ProbeLiveFromStartNumberAsync(ctx, cache, number, cancellationToken);
             if (result is { Success: true })
             {
-                var host = TryParseUrlAuthority(result.RequestUrl)?.Host;
-                if (host != null)
-                {
-                    winCounts[host] = winCounts.GetValueOrDefault(host) + 1;
-                    winSampleUrls[host] = result.RequestUrl!;
-                }
+                var host = RecordWinner(result);
                 Logger.InfoMarkUp(host != null
                     ? $"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [green]available[/] on [cyan]{host.EscapeMarkup()}[/].[/]"
                     : $"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [green]available[/].[/]");
@@ -1882,6 +1888,101 @@ internal class SimpleLiveRecordManager2
                 Logger.InfoMarkUp($"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [red]unavailable[/].[/]");
             }
             return result;
+        }
+
+        async Task<long?> FinishSmallWindowDescendingAsync(long lo, long hi, int parallel)
+        {
+            var nextDispatch = hi;
+            var nextCommit = hi;
+            var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>>();
+            var resolved = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result, bool Reused)>();
+            long? earliest = null;
+            var stop = false;
+
+            using var finishCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: boundary window {lo} ~ {hi} is small enough; finishing by descending concurrent download (parallel={parallel}).[/]");
+
+            while (!STOP_FLAG && !finishCts.IsCancellationRequested && !stop && nextCommit >= lo)
+            {
+                while (inFlight.Count < parallel && nextDispatch >= lo
+                       && !STOP_FLAG && !finishCts.IsCancellationRequested)
+                {
+                    var number = nextDispatch;
+                    if (cache.TryGetValue(number, out var cached) && cached.Result is { Success: true })
+                    {
+                        resolved[number] = (cached.Segment, cached.Result, true);
+                    }
+                    else
+                    {
+                        // 缓存里的失败仅代表探测镜像不可用；小窗口收尾用全量镜像重新确认。
+                        inFlight[number] = CreateAndDownloadFullRaceSegmentAsync(ctx, number, finishCts.Token);
+                    }
+                    nextDispatch--;
+                }
+
+                while (resolved.Remove(nextCommit, out var done))
+                {
+                    if (done.Result is { Success: true } && done.Segment != null)
+                    {
+                        if (!done.Reused)
+                            RecordWinner(done.Result);
+                        nextCommit--;
+                    }
+                    else
+                    {
+                        stop = true;
+                        finishCts.Cancel();
+                        TryDeleteDownloadResult(done.Result);
+                        // 若 hi 自身失效，视为窗口锚点过期：这个混沌小窗口可完全放弃，直接从 hi+1 继续接边。
+                        earliest = nextCommit + 1;
+                        break;
+                    }
+                }
+
+                if (stop || nextCommit < lo)
+                    break;
+
+                if (inFlight.Count == 0)
+                {
+                    if (nextDispatch < lo)
+                        break;
+                    continue;
+                }
+
+                var finished = await Task.WhenAny(inFlight.Values);
+                var finishedNumber = inFlight.First(kv => kv.Value == finished).Key;
+                inFlight.Remove(finishedNumber);
+                var finishedResult = await finished;
+                cache[finishedNumber] = (finishedResult.Segment, finishedResult.Result);
+                resolved[finishedNumber] = (finishedResult.Segment, finishedResult.Result, false);
+            }
+
+            finishCts.Cancel();
+
+            foreach (var kv in inFlight)
+            {
+                try
+                {
+                    var (_, result) = await kv.Value;
+                    TryDeleteDownloadResult(result);
+                }
+                catch
+                {
+                    // 忽略已取消/失败的清理
+                }
+            }
+
+            foreach (var item in resolved.Values)
+            {
+                if (!item.Reused)
+                    TryDeleteDownloadResult(item.Result);
+            }
+
+            if (STOP_FLAG || cancellationToken.IsCancellationRequested)
+                return null;
+
+            return stop ? earliest : lo;
         }
 
         void LogProbeWinDistribution()
@@ -1949,11 +2050,17 @@ internal class SimpleLiveRecordManager2
             hi = lastAvailable;
         }
 
-        if (lo < hi)
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: narrowing earliest available within {lo} ~ {hi} (binary search).[/]");
+        // small-window 是 DVR 最旧端的混沌小窗口：可用性可能快速变化，且窗口足够短；
+        // 一旦 high 锚点失效，允许完全放弃该小窗口，改从 high+1 接续回填。
+        var finishWindowSegments = Math.Max(1, (int)Math.Ceiling(40d / ctx.SegmentDuration));
+        var finishParallel = Math.Max(Math.Max(1, DownloaderConfig.MyOptions.ThreadCount) / 2, 1);
 
-        // 二分：在 [lo, hi] 中找最低可用编号（hi 已确认可用）
-        while (lo < hi && !STOP_FLAG && !cancellationToken.IsCancellationRequested)
+        if (lo < hi)
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: narrowing earliest available within {lo} ~ {hi} (binary search until window <= {finishWindowSegments} segment(s), 40s / targetDuration={ctx.SegmentDuration.ToString("0.###", CultureInfo.InvariantCulture)}).[/]");
+
+        // 二分：在 [lo, hi] 中把候选窗口缩小到约 40 秒；小窗口交给倒序并发下载收尾。
+        while (lo < hi && hi - lo + 1 > finishWindowSegments
+               && !STOP_FLAG && !cancellationToken.IsCancellationRequested)
         {
             var mid = lo + (hi - lo) / 2;
             var result = await ProbeAsync(mid, $"binary, window {lo}~{hi}");
@@ -1961,6 +2068,13 @@ internal class SimpleLiveRecordManager2
                 hi = mid;
             else
                 lo = mid + 1;
+        }
+
+        if (lo < hi && !STOP_FLAG && !cancellationToken.IsCancellationRequested)
+        {
+            var earliest = await FinishSmallWindowDescendingAsync(lo, hi, finishParallel);
+            LogProbeWinDistribution();
+            return (earliest, BestWinnerUrl(), false);
         }
 
         LogProbeWinDistribution();
