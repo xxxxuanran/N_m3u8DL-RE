@@ -47,10 +47,7 @@ internal class SimpleLiveRecordManager2
     CancellationTokenSource CancellationTokenSource = new(); // 取消Wait
 
     private readonly Lock lockObj = new();
-    private readonly HashSet<string> rawM3u8SegmentIds = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, string> rawM3u8CurrentStateLines = new(StringComparer.Ordinal);
-    private string? rawM3u8Content;
-    private bool rawM3u8EndListWritten;
+    private readonly LiveRawM3u8Accumulator rawM3u8Accumulator = new();
     TimeSpan? audioStart = null;
     public bool ShouldRestartOnMediaInitChanged { get; private set; } = false;
 
@@ -71,8 +68,6 @@ internal class SimpleLiveRecordManager2
     }
 
     private readonly record struct MissingSegmentRange(long Start, long End, SegmentGapSource Source);
-    private readonly record struct RawM3u8SegmentBlock(string Id, string[] Lines);
-    private readonly record struct RawM3u8ParseResult(List<RawM3u8SegmentBlock> Segments, bool HasEndList);
     // Live from start 回溯下载的不变上下文（模板分片、命名规律、临时目录、并发等），
     // 在定界探测与升序回填之间共享，避免重复传一长串参数。
     private sealed record LiveFromStartContext(
@@ -91,6 +86,13 @@ internal class SimpleLiveRecordManager2
         string[] HostMirrors);
 
     private readonly record struct LiveFromStartDescendingResolved(MediaSegment? Segment, DownloadResult? Result, bool Reused);
+
+    private readonly record struct LiveFromStartBackfillResolved(
+        MediaSegment? Segment,
+        DownloadResult? Result,
+        bool Recovered,
+        LiveFromStartBackfillMode Mode,
+        bool CountForStats);
 
     private sealed record LiveFromStartDescendingScanResult(
         Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>> InFlight,
@@ -292,6 +294,383 @@ internal class SimpleLiveRecordManager2
         }
     }
 
+    private string GetSegmentFilePath(MediaSegment segment, bool allHasDatetime, bool allSamePath, string tmpDir, string extension)
+    {
+        var filename = GetSegmentName(segment, allHasDatetime, allSamePath);
+        return Path.Combine(tmpDir, filename + $".{extension}.tmp");
+    }
+
+    private async Task<(List<Mediainfo> MediaInfos, bool UseAACFilter)> ReadAndApplyMediaInfoAsync(
+        StreamSpec streamSpec,
+        string filePath,
+        bool useAACFilter)
+    {
+        Logger.WarnMarkUp(ResString.readingInfo);
+        var mediaInfos = await MediainfoUtil.ReadInfoAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, filePath);
+        mediaInfos.ForEach(info => Logger.InfoMarkUp(info.ToStringMarkUp()));
+
+        lock (lockObj)
+        {
+            audioStart ??= mediaInfos.FirstOrDefault(x => x.Type == "Audio")?.StartTime;
+        }
+
+        ChangeSpecInfo(streamSpec, mediaInfos, ref useAACFilter);
+        return (mediaInfos, useAACFilter);
+    }
+
+    private async Task DecryptMediaInitIfNeededAsync(
+        MediaSegment mediaInit,
+        DownloadResult result,
+        string? currentKID,
+        DecryptEngine decryptEngine,
+        string decryptionBinaryPath,
+        bool allowMss = false)
+    {
+        if ((!mediaInit.IsEncrypted && string.IsNullOrEmpty(currentKID))
+            || !DownloaderConfig.MyOptions.MP4RealTimeDecryption
+            || string.IsNullOrEmpty(currentKID)
+            || (!allowMss && StreamExtractor.ExtractorType == ExtractorType.MSS))
+        {
+            return;
+        }
+
+        var enc = result.ActualFilePath;
+        var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
+        var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID);
+        if (dResult)
+        {
+            result.ActualFilePath = dec;
+        }
+    }
+
+    private async Task<bool> TryDecryptMediaSegmentAsync(
+        MediaSegment segment,
+        DownloadResult result,
+        string? currentKID,
+        string mp4InitFile,
+        DecryptEngine decryptEngine,
+        string decryptionBinaryPath)
+    {
+        if (!segment.IsEncrypted
+            || !DownloaderConfig.MyOptions.MP4RealTimeDecryption
+            || string.IsNullOrEmpty(currentKID))
+        {
+            return false;
+        }
+
+        var enc = result.ActualFilePath;
+        if (!File.Exists(enc))
+            return false;
+
+        var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
+        var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID, mp4InitFile);
+        if (!dResult)
+            return false;
+
+        File.Delete(enc);
+        result.ActualFilePath = dec;
+        return true;
+    }
+
+    private async Task<(WebVttSub CurrentVtt, bool FirstSub, long BaseTimestamp)> UpdateSubtitlesAsync(
+        StreamSpec streamSpec,
+        ProgressTask task,
+        ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
+        double segmentsDuration,
+        WebVttSub currentVtt,
+        bool firstSub,
+        long baseTimestamp)
+    {
+        // 自动修复VTT raw字幕
+        if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("vtt"))
+        {
+            // 排序字幕并修正时间戳
+            var keys = fileDic.Keys.OrderBy(k => k.Index).ToList();
+            foreach (var seg in keys)
+            {
+                var vttContent = await File.ReadAllTextAsync(fileDic[seg]!.ActualFilePath);
+                var waitCount = 0;
+                while (DownloaderConfig.MyOptions.LiveFixVttByAudio && audioStart == null && waitCount++ < 5)
+                {
+                    await Task.Delay(1000);
+                }
+                var subOffset = audioStart != null ? (long)audioStart.Value.TotalMilliseconds : 0L;
+                var vtt = WebVttSub.Parse(vttContent, subOffset);
+                // 手动计算MPEGTS
+                if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
+                {
+                    vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
+                }
+                if (firstSub) { currentVtt = vtt; firstSub = false; }
+                else currentVtt.AddCuesFromOne(vtt);
+            }
+        }
+
+        // 自动修复VTT mp4字幕
+        if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec.MediaType == Common.Enum.MediaType.SUBTITLES
+                                                       && streamSpec.Codecs != "stpp" && streamSpec.Extension != null && streamSpec.Extension.Contains("m4s"))
+        {
+            var initFile = fileDic.Values.FirstOrDefault(v => Path.GetFileName(v!.ActualFilePath).StartsWith("_init"));
+            var iniFileBytes = File.ReadAllBytes(initFile!.ActualFilePath);
+            var (sawVtt, timescale) = MP4VttUtil.CheckInit(iniFileBytes);
+            if (sawVtt)
+            {
+                var mp4s = fileDic.OrderBy(s => s.Key.Index).Select(s => s.Value).Select(v => v!.ActualFilePath).Where(p => p.EndsWith(".m4s")).ToArray();
+                if (firstSub)
+                {
+                    currentVtt = MP4VttUtil.ExtractSub(mp4s, timescale);
+                    firstSub = false;
+                }
+                else
+                {
+                    var vtt = MP4VttUtil.ExtractSub(mp4s, timescale);
+                    currentVtt.AddCuesFromOne(vtt);
+                }
+            }
+        }
+
+        // 自动修复TTML raw字幕
+        if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("ttml"))
+        {
+            var keys = fileDic.OrderBy(s => s.Key.Index).Where(v => v.Value!.ActualFilePath.EndsWith(".m4s")).Select(s => s.Key).ToList();
+            if (firstSub)
+            {
+                if (baseTimestamp != 0)
+                {
+                    var total = segmentsDuration;
+                    baseTimestamp -= (long)TimeSpan.FromSeconds(total).TotalMilliseconds;
+                }
+                var first = true;
+                foreach (var seg in keys)
+                {
+                    var vtt = MP4TtmlUtil.ExtractFromTTML(fileDic[seg]!.ActualFilePath, 0, baseTimestamp);
+                    // 手动计算MPEGTS
+                    if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
+                    {
+                        vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
+                    }
+                    if (first) { currentVtt = vtt; first = false; }
+                    else currentVtt.AddCuesFromOne(vtt);
+                }
+                firstSub = false;
+            }
+            else
+            {
+                foreach (var seg in keys)
+                {
+                    var vtt = MP4TtmlUtil.ExtractFromTTML(fileDic[seg]!.ActualFilePath, 0, baseTimestamp);
+                    // 手动计算MPEGTS
+                    if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
+                    {
+                        vtt.MpegtsTimestamp = (long)(90000 * (RecordedDurDic[task.Id] + keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration)));
+                    }
+                    currentVtt.AddCuesFromOne(vtt);
+                }
+            }
+        }
+
+        // 自动修复TTML mp4字幕
+        if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("m4s")
+            && streamSpec.Codecs != null && streamSpec.Codecs.Contains("stpp"))
+        {
+            // sawTtml暂时不判断
+            // var initFile = fileDic.Values.Where(v => Path.GetFileName(v!.ActualFilePath).StartsWith("_init")).FirstOrDefault();
+            // var iniFileBytes = File.ReadAllBytes(initFile!.ActualFilePath);
+            // var sawTtml = MP4TtmlUtil.CheckInit(iniFileBytes);
+            var keys = fileDic.OrderBy(s => s.Key.Index).Where(v => v.Value!.ActualFilePath.EndsWith(".m4s")).Select(s => s.Key);
+            if (firstSub)
+            {
+                if (baseTimestamp != 0)
+                {
+                    var total = segmentsDuration;
+                    baseTimestamp -= (long)TimeSpan.FromSeconds(total).TotalMilliseconds;
+                }
+                var first = true;
+                foreach (var seg in keys)
+                {
+                    var vtt = MP4TtmlUtil.ExtractFromMp4(fileDic[seg]!.ActualFilePath, 0, baseTimestamp);
+                    // 手动计算MPEGTS
+                    if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
+                    {
+                        vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
+                    }
+                    if (first) { currentVtt = vtt; first = false; }
+                    else currentVtt.AddCuesFromOne(vtt);
+                }
+                firstSub = false;
+            }
+            else
+            {
+                foreach (var seg in keys)
+                {
+                    var vtt = MP4TtmlUtil.ExtractFromMp4(fileDic[seg]!.ActualFilePath, 0, baseTimestamp);
+                    // 手动计算MPEGTS
+                    if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
+                    {
+                        vtt.MpegtsTimestamp = (long)(90000 * (RecordedDurDic[task.Id] + keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration)));
+                    }
+                    currentVtt.AddCuesFromOne(vtt);
+                }
+            }
+        }
+
+        return (currentVtt, firstSub, baseTimestamp);
+    }
+
+    private async Task<(Stream? FileOutputStream, bool InitWritten)> WriteRealTimeMergeAsync(
+        StreamSpec streamSpec,
+        ProgressTask task,
+        ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
+        string saveDir,
+        string saveName,
+        string tmpDir,
+        string mp4InitFile,
+        string? currentKID,
+        DecryptEngine decryptEngine,
+        Stream? fileOutputStream,
+        bool initWritten,
+        WebVttSub currentVtt)
+    {
+        // 合并
+        var outputExt = "." + streamSpec.Extension;
+        if (streamSpec.Extension == null) outputExt = ".ts";
+        else if (streamSpec is { MediaType: MediaType.AUDIO, Extension: "m4s" or "mp4" }) outputExt = ".m4a";
+        else if (streamSpec.MediaType != MediaType.SUBTITLES && streamSpec.Extension is "m4s" or "mp4") outputExt = ".mp4";
+        else if (streamSpec.MediaType == MediaType.SUBTITLES)
+        {
+            outputExt = DownloaderConfig.MyOptions.SubtitleFormat == Enum.SubtitleFormat.SRT ? ".srt" : ".vtt";
+        }
+
+        var output = Path.Combine(saveDir, saveName + outputExt);
+        MuxFormat? livePipeMuxFormat = null;
+        if (DownloaderConfig.MyOptions.LivePipeMux && streamSpec.MediaType != MediaType.SUBTITLES)
+        {
+            livePipeMuxFormat = GetLivePipeMuxFormat();
+            output = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(livePipeMuxFormat.Value));
+        }
+
+        // 移除无效片段
+        var badKeys = fileDic.Where(i => i.Value == null).Select(i => i.Key);
+        foreach (var badKey in badKeys)
+        {
+            fileDic.Remove(badKey, out _);
+        }
+
+        // 设置输出流
+        if (fileOutputStream == null)
+        {
+            // 检测目标文件是否存在，使用智能重命名
+            var finalOutput = OtherUtil.HandlePathCollision(output, streamSpec);
+            if (finalOutput != output)
+            {
+                Logger.WarnMarkUp($"{Path.GetFileName(output)} => {Path.GetFileName(finalOutput)}");
+                output = finalOutput;
+            }
+
+            if (!DownloaderConfig.MyOptions.LivePipeMux || streamSpec.MediaType == MediaType.SUBTITLES)
+            {
+                fileOutputStream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+            }
+            else
+            {
+                // 创建管道
+                var muxFormat = livePipeMuxFormat ?? GetLivePipeMuxFormat();
+                var muxOutput = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(muxFormat));
+                var finalMuxOutput = OtherUtil.HandlePathCollision(muxOutput, streamSpec);
+                if (finalMuxOutput != muxOutput)
+                {
+                    Logger.WarnMarkUp($"{Path.GetFileName(muxOutput)} => {Path.GetFileName(finalMuxOutput)}");
+                    muxOutput = finalMuxOutput;
+                }
+                output = muxOutput;
+                var pipeName = $"RE_pipe_{Guid.NewGuid()}";
+                fileOutputStream = PipeUtil.CreatePipe(pipeName);
+                Logger.InfoMarkUp($"{ResString.namedPipeCreated} [cyan]{pipeName.EscapeMarkup()}[/]");
+                PipeSteamNamesDic[task.Id] = pipeName;
+                if (PipeSteamNamesDic.Count == SelectedSteams.Count(x => x.MediaType != MediaType.SUBTITLES))
+                {
+                    var names = PipeSteamNamesDic.OrderBy(i => i.Key).Select(k => k.Value).ToArray();
+                    Logger.WarnMarkUp($"{ResString.namedPipeMux} [deepskyblue1]{Path.GetFileName(output).EscapeMarkup()}[/]");
+                    var t = PipeUtil.StartPipeMuxAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, names, output, muxFormat);
+                }
+
+                // Windows only
+                if (OperatingSystem.IsWindows())
+                    await (fileOutputStream as NamedPipeServerStream)!.WaitForConnectionAsync();
+            }
+        }
+
+        if (streamSpec.MediaType != MediaType.SUBTITLES)
+        {
+            var initResult = streamSpec.Playlist!.MediaInit != null ? fileDic[streamSpec.Playlist!.MediaInit!]! : null;
+            var files = fileDic.Where(f => f.Key != streamSpec.Playlist!.MediaInit).OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
+            // fmp4 的 init(ftyp+moov) 只需在输出流开头写入一次。
+            // 直播每轮刷新都会进入本方法，若每轮都前置 init，会在单个输出文件里
+            // 嵌入大量重复的 moov，导致 ffmpeg 报 "Found duplicated MOOV Atom" 且播放器索引缓慢。
+            if (initResult != null && mp4InitFile != "" && !initWritten)
+            {
+                // shaka/ffmpeg实时解密不需要init文件用于合并，mp4decrpyt需要
+                if (string.IsNullOrEmpty(currentKID) || decryptEngine == DecryptEngine.MP4DECRYPT)
+                {
+                    files = [initResult.ActualFilePath, ..files];
+                    initWritten = true;
+                }
+            }
+            foreach (var inputFilePath in files)
+            {
+                using (var inputStream = File.OpenRead(inputFilePath))
+                {
+                    inputStream.CopyTo(fileOutputStream);
+                }
+            }
+            if (!DownloaderConfig.MyOptions.LiveKeepSegments)
+            {
+                foreach (var inputFilePath in files.Where(x => !Path.GetFileName(x).StartsWith("_init")))
+                {
+                    File.Delete(inputFilePath);
+                }
+            }
+            fileDic.Clear();
+            if (initResult != null)
+            {
+                fileDic[streamSpec.Playlist!.MediaInit!] = initResult;
+            }
+        }
+        else
+        {
+            var initResult = streamSpec.Playlist!.MediaInit != null ? fileDic[streamSpec.Playlist!.MediaInit!]! : null;
+            var files = fileDic.OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
+            foreach (var inputFilePath in files)
+            {
+                if (!DownloaderConfig.MyOptions.LiveKeepSegments && !Path.GetFileName(inputFilePath).StartsWith("_init"))
+                {
+                    File.Delete(inputFilePath);
+                }
+            }
+
+            // 处理图形字幕
+            await SubtitleUtil.TryWriteImagePngsAsync(currentVtt, tmpDir);
+
+            var subText = currentVtt.ToVtt();
+            if (outputExt == ".srt")
+            {
+                subText = currentVtt.ToSrt();
+            }
+            var subBytes = Encoding.UTF8.GetBytes(subText);
+            fileOutputStream.Position = 0;
+            fileOutputStream.Write(subBytes);
+            fileDic.Clear();
+            if (initResult != null)
+            {
+                fileDic[streamSpec.Playlist!.MediaInit!] = initResult;
+            }
+        }
+
+        // 刷新buffer
+        fileOutputStream?.Flush();
+        return (fileOutputStream, initWritten);
+    }
+
     private async Task<bool> RecordStreamAsync(StreamSpec streamSpec, ProgressTask task, SpeedContainer speedContainer, BufferBlock<List<MediaSegment>> source)
     {
         var baseTimestamp = PublishDateTime == null ? 0L : (long)(PublishDateTime.Value.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, 0)).TotalMilliseconds;
@@ -311,8 +690,6 @@ internal class SimpleLiveRecordManager2
         bool liveFromStartMergeReady = !DownloaderConfig.MyOptions.LiveFromStart;
         task.StartTask();
 
-        var name = streamSpec.ToShortString();
-        var type = streamSpec.MediaType ?? Common.Enum.MediaType.VIDEO;
         var dirName = $"{task.Id}_{OtherUtil.GetValidFileName(streamSpec.GroupId ?? "", "-")}_{streamSpec.Codecs}_{streamSpec.Bandwidth}_{streamSpec.Language}";
         var tmpDir = Path.Combine(DownloaderConfig.DirPrefix, dirName);
         var saveDir = DownloaderConfig.MyOptions.SaveDir ?? Environment.CurrentDirectory;
@@ -383,27 +760,11 @@ internal class SimpleLiveRecordManager2
                         // 从文件读取KEY
                         await SearchKeyAsync(currentKID);
                         // 实时解密
-                        if ((streamSpec.Playlist.MediaInit.IsEncrypted || !string.IsNullOrEmpty(currentKID)) && DownloaderConfig.MyOptions.MP4RealTimeDecryption && !string.IsNullOrEmpty(currentKID) && StreamExtractor.ExtractorType != ExtractorType.MSS)
-                        {
-                            var enc = result.ActualFilePath;
-                            var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
-                            var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID);
-                            if (dResult)
-                            {
-                                FileDic[streamSpec.Playlist.MediaInit]!.ActualFilePath = dec;
-                            }
-                        }
+                        await DecryptMediaInitIfNeededAsync(streamSpec.Playlist.MediaInit, result, currentKID, decryptEngine, decryptionBinaryPath);
                         // ffmpeg读取信息
                         if (!readInfo)
                         {
-                            Logger.WarnMarkUp(ResString.readingInfo);
-                            mediaInfos = await MediainfoUtil.ReadInfoAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, result.ActualFilePath);
-                            mediaInfos.ForEach(info => Logger.InfoMarkUp(info.ToStringMarkUp()));
-                            lock (lockObj)
-                            {
-                                if (audioStart == null) audioStart = mediaInfos.FirstOrDefault(x => x.Type == "Audio")?.StartTime;
-                            }
-                            ChangeSpecInfo(streamSpec, mediaInfos, ref useAACFilter);
+                            (mediaInfos, useAACFilter) = await ReadAndApplyMediaInfoAsync(streamSpec, result.ActualFilePath, useAACFilter);
                             readInfo = true;
                         }
                         initDownloaded = true;
@@ -423,10 +784,7 @@ internal class SimpleLiveRecordManager2
                 {
                     var seg = segments.First();
                     segments = segments.Skip(1).ToList();
-                    // 获取文件名
-                    var filename = GetSegmentName(seg, allHasDatetime, SamePathDic[task.Id]);
-                    var index = seg.Index;
-                    var path = Path.Combine(tmpDir, filename + $".{streamSpec.Extension ?? "clip"}.tmp");
+                    var path = GetSegmentFilePath(seg, allHasDatetime, SamePathDic[task.Id], tmpDir, streamSpec.Extension ?? "clip");
                     var result = await Downloader.DownloadSegmentAsync(seg, path, speedContainer, headers);
                     FileDic[seg] = result;
                     if (result is not { Success: true })
@@ -445,13 +803,7 @@ internal class SimpleLiveRecordManager2
                             if (seg.IsEncrypted && DownloaderConfig.MyOptions.MP4RealTimeDecryption && !string.IsNullOrEmpty(currentKID))
                             {
                                 // 需要重新解密init
-                                var enc = FileDic[streamSpec.Playlist!.MediaInit!]!.ActualFilePath;
-                                var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
-                                var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID);
-                                if (dResult)
-                                {
-                                    FileDic[streamSpec.Playlist!.MediaInit!]!.ActualFilePath = dec;
-                                }
+                                await DecryptMediaInitIfNeededAsync(streamSpec.Playlist!.MediaInit!, FileDic[streamSpec.Playlist!.MediaInit!]!, currentKID, decryptEngine, decryptionBinaryPath, allowMss: true);
                             }
                         }
                         // 读取init信息
@@ -462,29 +814,14 @@ internal class SimpleLiveRecordManager2
                         // 从文件读取KEY
                         await SearchKeyAsync(currentKID);
                         // 实时解密
-                        if (seg.IsEncrypted && DownloaderConfig.MyOptions.MP4RealTimeDecryption && !string.IsNullOrEmpty(currentKID))
+                        if (await TryDecryptMediaSegmentAsync(seg, result, currentKID, mp4InitFile, decryptEngine, decryptionBinaryPath))
                         {
-                            var enc = result.ActualFilePath;
-                            var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
-                            var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID, mp4InitFile);
-                            if (dResult)
-                            {
-                                File.Delete(enc);
-                                result.ActualFilePath = dec;
-                                Mp4DecryptedSegments[seg] = true;
-                            }
+                            Mp4DecryptedSegments[seg] = true;
                         }
                         if (!readInfo)
                         {
                             // ffmpeg读取信息
-                            Logger.WarnMarkUp(ResString.readingInfo);
-                            mediaInfos = await MediainfoUtil.ReadInfoAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, result!.ActualFilePath);
-                            mediaInfos.ForEach(info => Logger.InfoMarkUp(info.ToStringMarkUp()));
-                            lock (lockObj)
-                            {
-                                if (audioStart == null) audioStart = mediaInfos.FirstOrDefault(x => x.Type == "Audio")?.StartTime;
-                            }
-                            ChangeSpecInfo(streamSpec, mediaInfos, ref useAACFilter);
+                            (mediaInfos, useAACFilter) = await ReadAndApplyMediaInfoAsync(streamSpec, result.ActualFilePath, useAACFilter);
                             readInfo = true;
                         }
                     }
@@ -497,26 +834,15 @@ internal class SimpleLiveRecordManager2
                 };
                 await Parallel.ForEachAsync(segments, options, async (seg, _) =>
                 {
-                    // 获取文件名
-                    var filename = GetSegmentName(seg, allHasDatetime, SamePathDic[task.Id]);
-                    var index = seg.Index;
-                    var path = Path.Combine(tmpDir, filename + $".{streamSpec.Extension ?? "clip"}.tmp");
+                    var path = GetSegmentFilePath(seg, allHasDatetime, SamePathDic[task.Id], tmpDir, streamSpec.Extension ?? "clip");
                     var result = await Downloader.DownloadSegmentAsync(seg, path, speedContainer, headers);
                     FileDic[seg] = result;
                     if (result is { Success: true })
                         task.Increment(1);
                     // 实时解密
-                    if (seg.IsEncrypted && DownloaderConfig.MyOptions.MP4RealTimeDecryption && result is { Success: true } && !string.IsNullOrEmpty(currentKID))
+                    if (result is { Success: true } && await TryDecryptMediaSegmentAsync(seg, result, currentKID, mp4InitFile, decryptEngine, decryptionBinaryPath))
                     {
-                        var enc = result.ActualFilePath;
-                        var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
-                        var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID, mp4InitFile);
-                        if (dResult)
-                        {
-                            File.Delete(enc);
-                            result.ActualFilePath = dec;
-                            Mp4DecryptedSegments[seg] = true;
-                        }
+                        Mp4DecryptedSegments[seg] = true;
                     }
                 });
             }
@@ -551,138 +877,14 @@ internal class SimpleLiveRecordManager2
                 ? pendingSegments.Sum(s => s.Duration)
                 : segments.Sum(s => s.Duration);
 
-            // 自动修复VTT raw字幕
-            if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("vtt"))
-            {
-                // 排序字幕并修正时间戳
-                var keys = FileDic.Keys.OrderBy(k => k.Index).ToList();
-                foreach (var seg in keys)
-                {
-                    var vttContent = await File.ReadAllTextAsync(FileDic[seg]!.ActualFilePath);
-                    var waitCount = 0;
-                    while (DownloaderConfig.MyOptions.LiveFixVttByAudio && audioStart == null && waitCount++ < 5)
-                    {
-                        await Task.Delay(1000);
-                    }
-                    var subOffset = audioStart != null ? (long)audioStart.Value.TotalMilliseconds : 0L;
-                    var vtt = WebVttSub.Parse(vttContent, subOffset);
-                    // 手动计算MPEGTS
-                    if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
-                    {
-                        vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
-                    }
-                    if (firstSub) { currentVtt = vtt; firstSub = false; }
-                    else currentVtt.AddCuesFromOne(vtt);
-                }
-            }
-
-            // 自动修复VTT mp4字幕
-            if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec.MediaType == Common.Enum.MediaType.SUBTITLES
-                                                           && streamSpec.Codecs != "stpp" && streamSpec.Extension != null && streamSpec.Extension.Contains("m4s"))
-            {
-                var initFile = FileDic.Values.FirstOrDefault(v => Path.GetFileName(v!.ActualFilePath).StartsWith("_init"));
-                var iniFileBytes = File.ReadAllBytes(initFile!.ActualFilePath);
-                var (sawVtt, timescale) = MP4VttUtil.CheckInit(iniFileBytes);
-                if (sawVtt)
-                {
-                    var mp4s = FileDic.OrderBy(s => s.Key.Index).Select(s => s.Value).Select(v => v!.ActualFilePath).Where(p => p.EndsWith(".m4s")).ToArray();
-                    if (firstSub)
-                    {
-                        currentVtt = MP4VttUtil.ExtractSub(mp4s, timescale);
-                        firstSub = false;
-                    }
-                    else
-                    {
-                        var vtt = MP4VttUtil.ExtractSub(mp4s, timescale);
-                        currentVtt.AddCuesFromOne(vtt);
-                    }
-                }
-            }
-
-            // 自动修复TTML raw字幕
-            if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("ttml"))
-            {
-                var keys = FileDic.OrderBy(s => s.Key.Index).Where(v => v.Value!.ActualFilePath.EndsWith(".m4s")).Select(s => s.Key).ToList();
-                if (firstSub)
-                {
-                    if (baseTimestamp != 0)
-                    {
-                        var total = segmentsDuration;
-                        baseTimestamp -= (long)TimeSpan.FromSeconds(total).TotalMilliseconds;
-                    }
-                    var first = true;
-                    foreach (var seg in keys)
-                    {
-                        var vtt = MP4TtmlUtil.ExtractFromTTML(FileDic[seg]!.ActualFilePath, 0, baseTimestamp);
-                        // 手动计算MPEGTS
-                        if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
-                        {
-                            vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
-                        }
-                        if (first) { currentVtt = vtt; first = false; }
-                        else currentVtt.AddCuesFromOne(vtt);
-                    }
-                    firstSub = false;
-                }
-                else
-                {
-                    foreach (var seg in keys)
-                    {
-                        var vtt = MP4TtmlUtil.ExtractFromTTML(FileDic[seg]!.ActualFilePath, 0, baseTimestamp);
-                        // 手动计算MPEGTS
-                        if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
-                        {
-                            vtt.MpegtsTimestamp = (long)(90000 * (RecordedDurDic[task.Id] + keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration)));
-                        }
-                        currentVtt.AddCuesFromOne(vtt);
-                    }
-                }
-            }
-
-            // 自动修复TTML mp4字幕
-            if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("m4s")
-                && streamSpec.Codecs != null && streamSpec.Codecs.Contains("stpp"))
-            {
-                // sawTtml暂时不判断
-                // var initFile = FileDic.Values.Where(v => Path.GetFileName(v!.ActualFilePath).StartsWith("_init")).FirstOrDefault();
-                // var iniFileBytes = File.ReadAllBytes(initFile!.ActualFilePath);
-                // var sawTtml = MP4TtmlUtil.CheckInit(iniFileBytes);
-                var keys = FileDic.OrderBy(s => s.Key.Index).Where(v => v.Value!.ActualFilePath.EndsWith(".m4s")).Select(s => s.Key);
-                if (firstSub)
-                {
-                    if (baseTimestamp != 0)
-                    {
-                        var total = segmentsDuration;
-                        baseTimestamp -= (long)TimeSpan.FromSeconds(total).TotalMilliseconds;
-                    }
-                    var first = true;
-                    foreach (var seg in keys)
-                    {
-                        var vtt = MP4TtmlUtil.ExtractFromMp4(FileDic[seg]!.ActualFilePath, 0, baseTimestamp);
-                        // 手动计算MPEGTS
-                        if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
-                        {
-                            vtt.MpegtsTimestamp = (long)(90000 * keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration));
-                        }
-                        if (first) { currentVtt = vtt; first = false; }
-                        else currentVtt.AddCuesFromOne(vtt);
-                    }
-                    firstSub = false;
-                }
-                else
-                {
-                    foreach (var seg in keys)
-                    {
-                        var vtt = MP4TtmlUtil.ExtractFromMp4(FileDic[seg]!.ActualFilePath, 0, baseTimestamp);
-                        // 手动计算MPEGTS
-                        if (currentVtt.MpegtsTimestamp == 0 && vtt.MpegtsTimestamp == 0)
-                        {
-                            vtt.MpegtsTimestamp = (long)(90000 * (RecordedDurDic[task.Id] + keys.Where(s => s.Index < seg.Index).Sum(s => s.Duration)));
-                        }
-                        currentVtt.AddCuesFromOne(vtt);
-                    }
-                }
-            }
+            (currentVtt, firstSub, baseTimestamp) = await UpdateSubtitlesAsync(
+                streamSpec,
+                task,
+                FileDic,
+                segmentsDuration,
+                currentVtt,
+                firstSub,
+                baseTimestamp);
 
             RecordedDurDic[task.Id] += segmentsDuration;
 
@@ -697,146 +899,19 @@ internal class SimpleLiveRecordManager2
             // 合并逻辑
             if (DownloaderConfig.MyOptions.LiveRealTimeMerge)
             {
-                // 合并
-                var outputExt = "." + streamSpec.Extension;
-                if (streamSpec.Extension == null) outputExt = ".ts";
-                else if (streamSpec is { MediaType: MediaType.AUDIO, Extension: "m4s" or "mp4" }) outputExt = ".m4a";
-                else if (streamSpec.MediaType != MediaType.SUBTITLES && streamSpec.Extension is "m4s" or "mp4") outputExt = ".mp4";
-                else if (streamSpec.MediaType == MediaType.SUBTITLES)
-                {
-                    outputExt = DownloaderConfig.MyOptions.SubtitleFormat == Enum.SubtitleFormat.SRT ? ".srt" : ".vtt";
-                }
-
-                var output = Path.Combine(saveDir, saveName + outputExt);
-                MuxFormat? livePipeMuxFormat = null;
-                if (DownloaderConfig.MyOptions.LivePipeMux && streamSpec.MediaType != MediaType.SUBTITLES)
-                {
-                    livePipeMuxFormat = GetLivePipeMuxFormat();
-                    output = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(livePipeMuxFormat.Value));
-                }
-
-                // 移除无效片段
-                var badKeys = FileDic.Where(i => i.Value == null).Select(i => i.Key);
-                foreach (var badKey in badKeys)
-                {
-                    FileDic!.Remove(badKey, out _);
-                }
-
-                // 设置输出流
-                if (fileOutputStream == null)
-                {
-                    // 检测目标文件是否存在，使用智能重命名
-                    var finalOutput = OtherUtil.HandlePathCollision(output, streamSpec);
-                    if (finalOutput != output)
-                    {
-                        Logger.WarnMarkUp($"{Path.GetFileName(output)} => {Path.GetFileName(finalOutput)}");
-                        output = finalOutput;
-                    }
-
-                    if (!DownloaderConfig.MyOptions.LivePipeMux || streamSpec.MediaType == MediaType.SUBTITLES)
-                    {
-                        fileOutputStream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-                    }
-                    else
-                    {
-                        // 创建管道
-                        var muxFormat = livePipeMuxFormat ?? GetLivePipeMuxFormat();
-                        var muxOutput = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(muxFormat));
-                        var finalMuxOutput = OtherUtil.HandlePathCollision(muxOutput, streamSpec);
-                        if (finalMuxOutput != muxOutput)
-                        {
-                            Logger.WarnMarkUp($"{Path.GetFileName(muxOutput)} => {Path.GetFileName(finalMuxOutput)}");
-                            muxOutput = finalMuxOutput;
-                        }
-                        output = muxOutput;
-                        var pipeName = $"RE_pipe_{Guid.NewGuid()}";
-                        fileOutputStream = PipeUtil.CreatePipe(pipeName);
-                        Logger.InfoMarkUp($"{ResString.namedPipeCreated} [cyan]{pipeName.EscapeMarkup()}[/]");
-                        PipeSteamNamesDic[task.Id] = pipeName;
-                        if (PipeSteamNamesDic.Count == SelectedSteams.Count(x => x.MediaType != MediaType.SUBTITLES))
-                        {
-                            var names = PipeSteamNamesDic.OrderBy(i => i.Key).Select(k => k.Value).ToArray();
-                            Logger.WarnMarkUp($"{ResString.namedPipeMux} [deepskyblue1]{Path.GetFileName(output).EscapeMarkup()}[/]");
-                            var t = PipeUtil.StartPipeMuxAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, names, output, muxFormat);
-                        }
-
-                        // Windows only
-                        if (OperatingSystem.IsWindows())
-                            await (fileOutputStream as NamedPipeServerStream)!.WaitForConnectionAsync();
-                    }
-                }
-
-                if (streamSpec.MediaType != MediaType.SUBTITLES)
-                {
-                    var initResult = streamSpec.Playlist!.MediaInit != null ? FileDic[streamSpec.Playlist!.MediaInit!]! : null;
-                    var files = FileDic.Where(f => f.Key != streamSpec.Playlist!.MediaInit).OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
-                    // fmp4 的 init(ftyp+moov) 只需在输出流开头写入一次。
-                    // 直播每轮刷新都会进入本方法，若每轮都前置 init，会在单个输出文件里
-                    // 嵌入大量重复的 moov，导致 ffmpeg 报 "Found duplicated MOOV Atom" 且播放器索引缓慢。
-                    if (initResult != null && mp4InitFile != "" && !initWritten)
-                    {
-                        // shaka/ffmpeg实时解密不需要init文件用于合并，mp4decrpyt需要
-                        if (string.IsNullOrEmpty(currentKID) || decryptEngine == DecryptEngine.MP4DECRYPT)
-                        {
-                            files = [initResult.ActualFilePath, ..files];
-                            initWritten = true;
-                        }
-                    }
-                    foreach (var inputFilePath in files)
-                    {
-                        using (var inputStream = File.OpenRead(inputFilePath))
-                        {
-                            inputStream.CopyTo(fileOutputStream);
-                        }
-                    }
-                    if (!DownloaderConfig.MyOptions.LiveKeepSegments)
-                    {
-                        foreach (var inputFilePath in files.Where(x => !Path.GetFileName(x).StartsWith("_init")))
-                        {
-                            File.Delete(inputFilePath);
-                        }
-                    }
-                    FileDic.Clear();
-                    if (initResult != null)
-                    {
-                        FileDic[streamSpec.Playlist!.MediaInit!] = initResult;
-                    }
-                }
-                else
-                {
-                    var initResult = streamSpec.Playlist!.MediaInit != null ? FileDic[streamSpec.Playlist!.MediaInit!]! : null;
-                    var files = FileDic.OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
-                    foreach (var inputFilePath in files)
-                    {
-                        if (!DownloaderConfig.MyOptions.LiveKeepSegments && !Path.GetFileName(inputFilePath).StartsWith("_init"))
-                        {
-                            File.Delete(inputFilePath);
-                        }
-                    }
-
-                    // 处理图形字幕
-                    await SubtitleUtil.TryWriteImagePngsAsync(currentVtt, tmpDir);
-
-                    var subText = currentVtt.ToVtt();
-                    if (outputExt == ".srt")
-                    {
-                        subText = currentVtt.ToSrt();
-                    }
-                    var subBytes = Encoding.UTF8.GetBytes(subText);
-                    fileOutputStream.Position = 0;
-                    fileOutputStream.Write(subBytes);
-                    FileDic.Clear();
-                    if (initResult != null)
-                    {
-                        FileDic[streamSpec.Playlist!.MediaInit!] = initResult;
-                    }
-                }
-
-                // 刷新buffer
-                if (fileOutputStream != null)
-                {
-                    fileOutputStream.Flush();
-                }
+                (fileOutputStream, initWritten) = await WriteRealTimeMergeAsync(
+                    streamSpec,
+                    task,
+                    FileDic,
+                    saveDir,
+                    saveName,
+                    tmpDir,
+                    mp4InitFile,
+                    currentKID,
+                    decryptEngine,
+                    fileOutputStream,
+                    initWritten,
+                    currentVtt);
             }
 
             if (STOP_FLAG && source.Count == 0)
@@ -999,245 +1074,7 @@ internal class SimpleLiveRecordManager2
             Directory.CreateDirectory(DownloaderConfig.DirPrefix);
 
         var file = Path.Combine(DownloaderConfig.DirPrefix, "raw.m3u8");
-        if (rawM3u8Content == null)
-        {
-            await InitializeRawM3u8AccumulatorAsync(file, rawM3u8);
-            return;
-        }
-
-        if (rawM3u8EndListWritten)
-            return;
-
-        var parsed = ParseRawM3u8(rawM3u8);
-        var appendedLines = new List<string>();
-        foreach (var segment in parsed.Segments)
-        {
-            if (!rawM3u8SegmentIds.Add(segment.Id))
-                continue;
-
-            appendedLines.AddRange(FilterRawM3u8SegmentBlockLines(segment.Lines));
-        }
-
-        if (parsed.HasEndList && !rawM3u8EndListWritten)
-        {
-            appendedLines.Add("#EXT-X-ENDLIST");
-            rawM3u8EndListWritten = true;
-        }
-
-        if (appendedLines.Count == 0)
-            return;
-
-        var appendText = BuildRawM3u8AppendText(appendedLines);
-        await File.AppendAllTextAsync(file, appendText, GlobalUtil.Utf8NoBom);
-        rawM3u8Content += appendText;
-    }
-
-    private async Task InitializeRawM3u8AccumulatorAsync(string file, string rawM3u8)
-    {
-        var initialContent = NormalizeRawM3u8(rawM3u8);
-        var shouldWriteInitialContent = true;
-
-        if (File.Exists(file))
-        {
-            var fileContent = await File.ReadAllTextAsync(file, Encoding.UTF8);
-            if (ParseRawM3u8(fileContent).Segments.Count > 0)
-            {
-                initialContent = fileContent;
-                shouldWriteInitialContent = false;
-            }
-        }
-
-        var parsed = ParseRawM3u8(initialContent);
-        if (parsed.Segments.Count == 0)
-            return;
-
-        rawM3u8Content = initialContent;
-        rawM3u8EndListWritten = parsed.HasEndList;
-        rawM3u8SegmentIds.Clear();
-        rawM3u8CurrentStateLines.Clear();
-        CollectRawM3u8StateLines(initialContent);
-
-        foreach (var segment in parsed.Segments)
-        {
-            rawM3u8SegmentIds.Add(segment.Id);
-        }
-
-        if (shouldWriteInitialContent)
-        {
-            await File.WriteAllTextAsync(file, initialContent + Environment.NewLine, GlobalUtil.Utf8NoBom);
-            rawM3u8Content += Environment.NewLine;
-        }
-    }
-
-    private List<string> FilterRawM3u8SegmentBlockLines(IEnumerable<string> blockLines)
-    {
-        var filteredLines = new List<string>();
-
-        foreach (var line in blockLines)
-        {
-            if (TryGetRawM3u8StateLineKey(line, out var stateKey))
-            {
-                if (rawM3u8CurrentStateLines.TryGetValue(stateKey, out var currentStateLine) && currentStateLine == line)
-                    continue;
-
-                rawM3u8CurrentStateLines[stateKey] = line;
-            }
-
-            if (IsRawM3u8StateLine(line))
-            {
-                filteredLines.Add(line);
-                continue;
-            }
-
-            filteredLines.Add(line);
-        }
-
-        return filteredLines;
-    }
-
-    private string BuildRawM3u8AppendText(IReadOnlyList<string> appendedLines)
-    {
-        var builder = new StringBuilder();
-        if (rawM3u8Content is { Length: > 0 } && !rawM3u8Content.EndsWith('\n') && !rawM3u8Content.EndsWith('\r'))
-        {
-            builder.AppendLine();
-        }
-
-        builder.AppendJoin(Environment.NewLine, appendedLines);
-        builder.AppendLine();
-        return builder.ToString();
-    }
-
-    private void CollectRawM3u8StateLines(string rawM3u8)
-    {
-        foreach (var line in ReadRawM3u8Lines(rawM3u8))
-        {
-            if (TryGetRawM3u8StateLineKey(line, out var stateKey))
-                rawM3u8CurrentStateLines[stateKey] = line;
-        }
-    }
-
-    private static RawM3u8ParseResult ParseRawM3u8(string rawM3u8)
-    {
-        if (!LooksLikeMediaPlaylist(rawM3u8))
-            return new RawM3u8ParseResult([], false);
-
-        var segments = new List<RawM3u8SegmentBlock>();
-        var blockLines = new List<string>();
-        var hasMediaSequence = false;
-        var nextSequence = 0L;
-        var hasEndList = false;
-
-        foreach (var line in ReadRawM3u8Lines(rawM3u8))
-        {
-            if (line.StartsWith("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal))
-            {
-                var sequenceText = line["#EXT-X-MEDIA-SEQUENCE:".Length..].Trim();
-                if (long.TryParse(sequenceText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sequence))
-                {
-                    nextSequence = sequence;
-                    hasMediaSequence = true;
-                }
-                continue;
-            }
-
-            if (line.StartsWith("#EXT-X-ENDLIST", StringComparison.Ordinal))
-            {
-                hasEndList = true;
-                continue;
-            }
-
-            if (IsRawM3u8SegmentBlockLine(line))
-            {
-                blockLines.Add(line);
-                continue;
-            }
-
-            if (line.StartsWith('#'))
-            {
-                if (blockLines.Count > 0)
-                    blockLines.Add(line);
-                continue;
-            }
-
-            blockLines.Add(line);
-            var segmentId = hasMediaSequence
-                ? $"seq:{nextSequence.ToString(CultureInfo.InvariantCulture)}"
-                : $"uri:{line}";
-            segments.Add(new RawM3u8SegmentBlock(segmentId, [.. blockLines]));
-            blockLines.Clear();
-
-            if (hasMediaSequence)
-                nextSequence++;
-        }
-
-        return new RawM3u8ParseResult(segments, hasEndList);
-    }
-
-    private static bool LooksLikeMediaPlaylist(string rawM3u8)
-    {
-        if (rawM3u8.Contains("#EXT-X-STREAM-INF", StringComparison.Ordinal))
-            return false;
-
-        return rawM3u8.Contains("#EXTINF", StringComparison.Ordinal)
-               || rawM3u8.Contains("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal)
-               || rawM3u8.Contains("#EXT-X-TARGETDURATION:", StringComparison.Ordinal);
-    }
-
-    private static bool IsRawM3u8StateLine(string line)
-    {
-        return line.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal);
-    }
-
-    private static bool TryGetRawM3u8StateLineKey(string line, out string stateKey)
-    {
-        if (line.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal))
-        {
-            stateKey = "#EXT-X-KEY";
-            return true;
-        }
-
-        if (line.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal))
-        {
-            stateKey = "#EXT-X-MAP";
-            return true;
-        }
-
-        stateKey = string.Empty;
-        return false;
-    }
-
-    private static bool IsRawM3u8SegmentBlockLine(string line)
-    {
-        return line.StartsWith("#EXTINF", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-BYTERANGE:", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-PROGRAM-DATE-TIME:", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-DISCONTINUITY", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-DATERANGE:", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-GAP", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-BITRATE:", StringComparison.Ordinal)
-               || line.StartsWith("#EXT-X-PART:", StringComparison.Ordinal)
-               || IsRawM3u8StateLine(line);
-    }
-
-    private static string NormalizeRawM3u8(string rawM3u8)
-    {
-        return string.Join(Environment.NewLine, ReadRawM3u8Lines(rawM3u8));
-    }
-
-    private static IEnumerable<string> ReadRawM3u8Lines(string rawM3u8)
-    {
-        using var reader = new StringReader(rawM3u8);
-        string? line;
-        while ((line = reader.ReadLine()) != null)
-        {
-            line = line.Trim();
-            if (line.Length == 0)
-                continue;
-
-            yield return line;
-        }
+        await rawM3u8Accumulator.UpdateAsync(file, rawM3u8);
     }
 
     private void FilterMediaSegments(StreamSpec streamSpec, ProgressTask task, bool allHasDatetime, bool allSamePath)
@@ -1449,8 +1286,8 @@ internal class SimpleLiveRecordManager2
 
             var nextDispatch = earliestNumber.Value;
             var nextCommit = earliestNumber.Value;
-            var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result, bool Recovered, bool FallbackAttempted, LiveFromStartBackfillMode Mode, bool CountForMirrorFirstStability, bool CountForPinnedFirstInstability)>>();
-            var resolved = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result, bool Recovered, bool FallbackAttempted, LiveFromStartBackfillMode Mode, bool CountForMirrorFirstStability, bool CountForPinnedFirstInstability)>();
+            var inFlight = new Dictionary<long, Task<LiveFromStartBackfillResolved>>();
+            var resolved = new Dictionary<long, LiveFromStartBackfillResolved>();
             var downloadedSegments = new List<MediaSegment>();
             var committed = new HashSet<long>();
             var discardedExpiredNumbers = new List<long>();
@@ -1469,7 +1306,7 @@ internal class SimpleLiveRecordManager2
                     {
                         // 探测/小窗口缓存命中只复用文件，不参与 mirror-first / pinned-first 状态统计。
                         var mode = mirrorFirstMode ? LiveFromStartBackfillMode.MirrorFirst : LiveFromStartBackfillMode.PinnedFirst;
-                        resolved[number] = (cached.Segment, cached.Result, false, true, mode, false, false);
+                        resolved[number] = new LiveFromStartBackfillResolved(cached.Segment, cached.Result, false, mode, CountForStats: false);
                     }
                     else
                     {
@@ -1500,7 +1337,7 @@ internal class SimpleLiveRecordManager2
 
                         if (done.Mode == LiveFromStartBackfillMode.MirrorFirst)
                         {
-                            if (done.CountForMirrorFirstStability)
+                            if (done.CountForStats)
                             {
                                 consecutivePinnedFailures = 0;
                                 pinnedFallbackRecoveries = 0;
@@ -1514,7 +1351,7 @@ internal class SimpleLiveRecordManager2
                         }
                         else
                         {
-                            if (done.CountForPinnedFirstInstability)
+                            if (done.CountForStats)
                             {
                                 consecutiveMirrorFirstSuccesses = 0;
                                 consecutivePinnedFailures = 0;
@@ -1533,9 +1370,9 @@ internal class SimpleLiveRecordManager2
                         discardedExpiredNumbers.Add(nextCommit);
                         TryDeleteDownloadResult(done.Result);
 
-                        if (done.CountForMirrorFirstStability || done.CountForPinnedFirstInstability)
+                        if (done.CountForStats)
                             consecutiveMirrorFirstSuccesses = 0;
-                        if (done.CountForPinnedFirstInstability && done.Mode == LiveFromStartBackfillMode.PinnedFirst && ++consecutivePinnedFailures >= pinnedUnstableThreshold)
+                        if (done.CountForStats && done.Mode == LiveFromStartBackfillMode.PinnedFirst && ++consecutivePinnedFailures >= pinnedUnstableThreshold)
                         {
                             if (!mirrorFirstMode)
                             {
@@ -1565,7 +1402,7 @@ internal class SimpleLiveRecordManager2
                 var finishedResult = await finished;
                 if (finishedResult.Recovered)
                     recoveredByFallbackCount++;
-                resolved[finishedNumber] = (finishedResult.Segment, finishedResult.Result, finishedResult.Recovered, finishedResult.FallbackAttempted, finishedResult.Mode, finishedResult.CountForMirrorFirstStability, finishedResult.CountForPinnedFirstInstability);
+                resolved[finishedNumber] = finishedResult;
             }
 
             // ===== 收尾：取消并清理未提交的下载文件 =====
@@ -1574,8 +1411,8 @@ internal class SimpleLiveRecordManager2
             {
                 try
                 {
-                    var (_, result, _, _, _, _, _) = await kv.Value;
-                    if (result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(result))
+                    var done = await kv.Value;
+                    if (done.Result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(done.Result))
                         discardedCleanupCount++;
                 }
                 catch
@@ -2075,9 +1912,9 @@ internal class SimpleLiveRecordManager2
     /// <summary>
     /// 阶段 2：构造并下载指定编号的回填分片（并发安全，不写共享缓存）。
     /// MirrorFirst 直接使用 live-from-start 镜像子集竞速；PinnedFirst 优先锁定到最后一次请求的 host，失败后再镜像竞速兜底。
-    /// 返回值 Recovered 标识 PinnedFirst 中 pinned host 失败后由镜像竞速救回。
+    /// 返回值 Recovered 标识 PinnedFirst 中 pinned host 失败后由镜像竞速救回；CountForStats 标识是否参与策略切换统计。
     /// </summary>
-    private async Task<(MediaSegment Segment, DownloadResult? Result, bool Recovered, bool FallbackAttempted, LiveFromStartBackfillMode Mode, bool CountForMirrorFirstStability, bool CountForPinnedFirstInstability)> CreateAndDownloadBackfillSegmentAsync(
+    private async Task<LiveFromStartBackfillResolved> CreateAndDownloadBackfillSegmentAsync(
         LiveFromStartContext ctx,
         long number,
         Uri? pinnedAuthority,
@@ -2086,7 +1923,7 @@ internal class SimpleLiveRecordManager2
     {
         var candidate = CreateFilledSegment(ctx.Template, ctx.TemplateUrlParts, number, ctx.TemplateNumber, ctx.SegmentDuration);
         if (candidate == null)
-            return (new MediaSegment { Index = number }, null, false, false, mode, false, false);
+            return new LiveFromStartBackfillResolved(new MediaSegment { Index = number }, null, false, mode, CountForStats: false);
 
         var filename = GetSegmentName(candidate, ctx.AllHasDatetime, ctx.AllSamePath);
         var path = Path.Combine(ctx.TmpDir, filename + $".{ctx.Extension}.tmp");
@@ -2094,7 +1931,7 @@ internal class SimpleLiveRecordManager2
         if (mode == LiveFromStartBackfillMode.MirrorFirst || pinnedAuthority == null)
         {
             var mirrorRace = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: ctx.HostMirrors);
-            return (mirrorRace.Segment, mirrorRace.Result, false, true, LiveFromStartBackfillMode.MirrorFirst, true, false);
+            return new LiveFromStartBackfillResolved(mirrorRace.Segment, mirrorRace.Result, false, LiveFromStartBackfillMode.MirrorFirst, CountForStats: true);
         }
 
         // 锁定 host 单点下载（hostMirrorsOverride 传空数组 => 不竞速）
@@ -2103,10 +1940,10 @@ internal class SimpleLiveRecordManager2
             candidate.Url = RewriteUrlAuthority(originalUrl, pinnedAuthority);
         var pinned = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: []);
         if (pinned.Result is { Success: true })
-            return (pinned.Segment, pinned.Result, false, false, LiveFromStartBackfillMode.PinnedFirst, false, true);
+            return new LiveFromStartBackfillResolved(pinned.Segment, pinned.Result, false, LiveFromStartBackfillMode.PinnedFirst, CountForStats: true);
 
         if (STOP_FLAG || cancellationToken.IsCancellationRequested)
-            return (candidate, null, false, false, LiveFromStartBackfillMode.PinnedFirst, false, false);
+            return new LiveFromStartBackfillResolved(candidate, null, false, LiveFromStartBackfillMode.PinnedFirst, CountForStats: false);
 
         // 兜底：锁定 host 缺该片 -> 恢复原始 URL，回退一次 live-from-start 镜像子集竞速。
         candidate.Url = originalUrl;
@@ -2114,7 +1951,7 @@ internal class SimpleLiveRecordManager2
         var recovered = fallbackRace.Result is { Success: true };
         if (recovered)
             Logger.DebugMarkUp($"[grey]Live from start: segment {number} missing on pinned host, recovered via mirror race.[/]");
-        return (fallbackRace.Segment, fallbackRace.Result, recovered, true, LiveFromStartBackfillMode.PinnedFirst, false, true);
+        return new LiveFromStartBackfillResolved(fallbackRace.Segment, fallbackRace.Result, recovered, LiveFromStartBackfillMode.PinnedFirst, CountForStats: true);
     }
 
     private static Uri? TryParseUrlAuthority(string? url)
@@ -2233,18 +2070,8 @@ internal class SimpleLiveRecordManager2
             if (!fileDic.TryGetValue(seg, out var result) || result is not { Success: true })
                 continue;
 
-            var enc = result.ActualFilePath;
-            if (!File.Exists(enc))
-                continue;
-
-            var dec = Path.Combine(Path.GetDirectoryName(enc)!, Path.GetFileNameWithoutExtension(enc) + "_dec" + Path.GetExtension(enc));
-            var dResult = await MP4DecryptUtil.DecryptAsync(decryptEngine, decryptionBinaryPath, DownloaderConfig.MyOptions.Keys, enc, dec, currentKID, mp4InitFile);
-            if (!dResult)
-                continue;
-
-            File.Delete(enc);
-            result.ActualFilePath = dec;
-            decryptedSegments[seg] = true;
+            if (await TryDecryptMediaSegmentAsync(seg, result, currentKID, mp4InitFile, decryptEngine, decryptionBinaryPath))
+                decryptedSegments[seg] = true;
         }
     }
 
@@ -2547,6 +2374,59 @@ internal class SimpleLiveRecordManager2
         return Math.Max(1L, Math.Min(60L, (long)Math.Ceiling(60D / waitTime)));
     }
 
+    private void ResolveLiveRefreshInterval()
+    {
+        if (WAIT_SEC != 0)
+            return;
+
+        if (DownloaderConfig.MyOptions.LiveWaitTime != null)
+        {
+            // 用户手动指定刷新间隔，优先级最高
+            WAIT_SEC = DownloaderConfig.MyOptions.LiveWaitTime.Value;
+        }
+        else if (SelectedSteams.All(s => s.Playlist!.TargetDuration is > 0))
+        {
+            // 优先以 #EXT-X-TARGETDURATION 作为基础轮询等待时长（取各流最小值，保证最快流不丢片）
+            WAIT_SEC = (int)Math.Ceiling(SelectedSteams.Min(s => s.Playlist!.TargetDuration!.Value));
+            WAIT_FROM_TARGET_DURATION = true;
+        }
+        else
+        {
+            // 后备方案：没有 #EXT-X-TARGETDURATION 时，按 总分片时长/2 - 2 估算
+            WAIT_SEC = (int)(SelectedSteams.Min(s => s.Playlist!.MediaParts[0].MediaSegments.Sum(s => s.Duration)) / 2);
+            WAIT_SEC -= 2; // 再提前两秒吧 留出冗余
+        }
+
+        if (WAIT_SEC <= 0) WAIT_SEC = 1;
+        Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds{(WAIT_FROM_TARGET_DURATION ? " (based on #EXT-X-TARGETDURATION)" : "")}");
+        DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= GetDefaultLiveFillSegmentsGapMax(WAIT_SEC);
+    }
+
+    private void DisableAudioBasedVttFixWithoutAudioStream()
+    {
+        if (SelectedSteams.All(x => x.MediaType != MediaType.AUDIO))
+        {
+            DownloaderConfig.MyOptions.LiveFixVttByAudio = false;
+        }
+    }
+
+    private ProgressColumn[] BuildLiveProgressColumns(ConcurrentDictionary<int, SpeedContainer> speedContainerDic)
+    {
+        var progressColumns = new ProgressColumn[]
+        {
+            new TaskDescriptionColumn() { Alignment = Justify.Left },
+            new RecordingDurationColumn(RecordedDurDic, RefreshedDurDic),
+            new RecordingStatusColumn(),
+            new PercentageColumn(),
+            new DownloadSpeedColumn(speedContainerDic),
+            new SpinnerColumn(),
+        };
+
+        return DownloaderConfig.MyOptions.NoAnsiColor
+            ? progressColumns.SkipLast(1).ToArray()
+            : progressColumns;
+    }
+
     public async Task<bool> StartRecordAsync()
     {
         DisableLiveSynthesisForImplicitIV();
@@ -2556,35 +2436,9 @@ internal class SimpleLiveRecordManager2
         ConcurrentDictionary<StreamSpec, bool?> Results = new();
         // 同步流
         FilterUtil.SyncStreams(SelectedSteams, takeLastCount);
-        // 设置等待时间
-        if (WAIT_SEC == 0)
-        {
-            if (DownloaderConfig.MyOptions.LiveWaitTime != null)
-            {
-                // 用户手动指定刷新间隔，优先级最高
-                WAIT_SEC = DownloaderConfig.MyOptions.LiveWaitTime.Value;
-            }
-            else if (SelectedSteams.All(s => s.Playlist!.TargetDuration is > 0))
-            {
-                // 优先以 #EXT-X-TARGETDURATION 作为基础轮询等待时长（取各流最小值，保证最快流不丢片）
-                WAIT_SEC = (int)Math.Ceiling(SelectedSteams.Min(s => s.Playlist!.TargetDuration!.Value));
-                WAIT_FROM_TARGET_DURATION = true;
-            }
-            else
-            {
-                // 后备方案：没有 #EXT-X-TARGETDURATION 时，按 总分片时长/2 - 2 估算
-                WAIT_SEC = (int)(SelectedSteams.Min(s => s.Playlist!.MediaParts[0].MediaSegments.Sum(s => s.Duration)) / 2);
-                WAIT_SEC -= 2; // 再提前两秒吧 留出冗余
-            }
-            if (WAIT_SEC <= 0) WAIT_SEC = 1;
-            Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds{(WAIT_FROM_TARGET_DURATION ? " (based on #EXT-X-TARGETDURATION)" : "")}");
-            DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= GetDefaultLiveFillSegmentsGapMax(WAIT_SEC);
-        }
+        ResolveLiveRefreshInterval();
         // 如果没有选中音频 取消通过音频修复vtt时间轴
-        if (SelectedSteams.All(x => x.MediaType != MediaType.AUDIO))
-        {
-            DownloaderConfig.MyOptions.LiveFixVttByAudio = false;
-        }
+        DisableAudioBasedVttFixWithoutAudioStream();
 
         /*// 写出master
         if (DownloaderConfig.MyOptions.LiveWriteHLS)
@@ -2599,21 +2453,7 @@ internal class SimpleLiveRecordManager2
         var progress = CustomAnsiConsole.Console.Progress().AutoClear(true);
         progress.AutoRefresh = DownloaderConfig.MyOptions.LogLevel != LogLevel.OFF;
 
-        // 进度条的列定义
-        var progressColumns = new ProgressColumn[]
-        {
-            new TaskDescriptionColumn() { Alignment = Justify.Left },
-            new RecordingDurationColumn(RecordedDurDic, RefreshedDurDic), // 时长显示
-            new RecordingStatusColumn(),
-            new PercentageColumn(),
-            new DownloadSpeedColumn(SpeedContainerDic), // 速度计算
-            new SpinnerColumn(),
-        };
-        if (DownloaderConfig.MyOptions.NoAnsiColor)
-        {
-            progressColumns = progressColumns.SkipLast(1).ToArray();
-        }
-        progress.Columns(progressColumns);
+        progress.Columns(BuildLiveProgressColumns(SpeedContainerDic));
 
         await progress.StartAsync(async ctx =>
         {
