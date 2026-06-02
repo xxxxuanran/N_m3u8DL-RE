@@ -232,7 +232,10 @@ internal class HLSExtractor : IExtractor
         if (ParserConfig.CustomeKey is { Length: > 0 })
             currentEncryptInfo.Key = ParserConfig.CustomeKey;
         if (ParserConfig.CustomeIV is { Length: > 0 })
+        {
             currentEncryptInfo.IV = ParserConfig.CustomeIV;
+            currentEncryptInfo.HasExplicitIV = true;
+        }
         // 上次读取到的加密行，#EXT-X-KEY:……
         string lastKeyLine = "";
 
@@ -321,6 +324,7 @@ internal class HLSExtractor : IExtractor
                     currentEncryptInfo.Method = parsedInfo.Method;
                     currentEncryptInfo.Key = parsedInfo.Key;
                     currentEncryptInfo.IV = parsedInfo.IV;
+                    currentEncryptInfo.HasExplicitIV = parsedInfo.HasExplicitIV;
                 }
                 lastKeyLine = line;
             }
@@ -336,6 +340,7 @@ internal class HLSExtractor : IExtractor
                     segment.EncryptInfo.Method = currentEncryptInfo.Method;
                     segment.EncryptInfo.Key = currentEncryptInfo.Key;
                     segment.EncryptInfo.IV = currentEncryptInfo.IV ?? HexUtil.HexToBytes(Convert.ToString(segIndex, 16).PadLeft(32, '0'));
+                    segment.EncryptInfo.HasExplicitIV = currentEncryptInfo.HasExplicitIV;
                 }
                 expectSegment = true;
                 segIndex++;
@@ -375,6 +380,7 @@ internal class HLSExtractor : IExtractor
                     playlist.MediaInit.EncryptInfo.Method = currentEncryptInfo.Method;
                     playlist.MediaInit.EncryptInfo.Key = currentEncryptInfo.Key;
                     playlist.MediaInit.EncryptInfo.IV = currentEncryptInfo.IV ?? HexUtil.HexToBytes(Convert.ToString(segIndex, 16).PadLeft(32, '0'));
+                    playlist.MediaInit.EncryptInfo.HasExplicitIV = currentEncryptInfo.HasExplicitIV;
                 }
                 // 遇到了其他的map，说明已经不是一个视频了，全部丢弃即可
                 else

@@ -589,9 +589,9 @@ internal static partial class CommandInvoker
             return null;
         }
         // 冲突检测
-        if (muxer == "mkvmerge" && format == "mp4")
+        if (muxer == "mkvmerge" && muxFormat != MuxFormat.MKV)
         {
-            result.AddError($"mkvmerge can not do mp4");
+            result.AddError("mkvmerge can only do mkv");
             return null;
         }
         return new MuxOptions()
@@ -610,22 +610,55 @@ internal static partial class CommandInvoker
         if (result.Tokens.Count == 0)
             return new LivePipeMuxOptions();
 
-        // 复用 mux-after-done 的解析与校验逻辑
-        var muxOptions = ParseMuxAfterDone(result);
-        if (muxOptions == null)
-            return null;
+        var v = result.Tokens[0].Value;
+        var p = new ComplexParamParser(v);
 
-        // live-pipe-mux 通过管道实时混流，仅支持 ffmpeg
-        if (muxOptions.UseMkvmerge)
+        MuxFormat? muxFormat = null;
+        var explicitFormat = p.GetValue("format");
+        var format = explicitFormat;
+        if (format == null)
+        {
+            var firstToken = v.Split(':')[0];
+            if (!firstToken.Contains('='))
+                format = firstToken;
+        }
+
+        if (format != null)
+        {
+            var parseResult = System.Enum.TryParse(format.ToUpperInvariant(), out MuxFormat parsedMuxFormat);
+            if (!parseResult)
+            {
+                result.AddError($"format={format} not valid");
+                return null;
+            }
+
+            muxFormat = parsedMuxFormat;
+        }
+
+        var muxer = p.GetValue("muxer") ?? "ffmpeg";
+        if (muxer != "ffmpeg" && muxer != "mkvmerge")
+        {
+            result.AddError($"muxer={muxer} not valid");
+            return null;
+        }
+
+        if (muxer == "mkvmerge")
         {
             result.AddError("live-pipe-mux only supports muxer=ffmpeg");
             return null;
         }
 
+        var bin_path = p.GetValue("bin_path") ?? "auto";
+        if (string.IsNullOrEmpty(bin_path))
+        {
+            result.AddError($"bin_path={bin_path} not valid");
+            return null;
+        }
+
         return new LivePipeMuxOptions
         {
-            MuxFormat = muxOptions.MuxFormat,
-            BinPath = muxOptions.BinPath
+            MuxFormat = muxFormat,
+            BinPath = bin_path == "auto" ? null : bin_path
         };
     }
 

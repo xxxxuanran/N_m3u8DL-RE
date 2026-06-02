@@ -28,11 +28,13 @@ public class DefaultHLSKeyProcessor : KeyProcessor
         if (!string.IsNullOrEmpty(iv))
         {
             encryptInfo.IV = HexUtil.HexToBytes(iv);
+            encryptInfo.HasExplicitIV = true;
         }
         // 自定义IV
         if (parserConfig.CustomeIV is { Length: > 0 })
         {
             encryptInfo.IV = parserConfig.CustomeIV;
+            encryptInfo.HasExplicitIV = true;
         }
 
         // KEY

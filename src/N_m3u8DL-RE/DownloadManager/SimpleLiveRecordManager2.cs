@@ -48,7 +48,7 @@ internal class SimpleLiveRecordManager2
 
     private readonly Lock lockObj = new();
     private readonly HashSet<string> rawM3u8SegmentIds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> rawM3u8StateLines = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> rawM3u8CurrentStateLines = new(StringComparer.Ordinal);
     private string? rawM3u8Content;
     private bool rawM3u8EndListWritten;
     TimeSpan? audioStart = null;
@@ -137,6 +137,55 @@ internal class SimpleLiveRecordManager2
     {
         return resolvedLivePipeMuxFormat ??= PipeUtil.ResolveLivePipeMuxFormat(
             DownloaderConfig.MyOptions.LivePipeMuxOptions?.MuxFormat, SelectedSteams);
+    }
+
+    private void DisableLiveSynthesisForImplicitIV()
+    {
+        if (StreamExtractor.ExtractorType != ExtractorType.HLS)
+            return;
+
+        if (!DownloaderConfig.MyOptions.LiveFillSegmentsGap && !DownloaderConfig.MyOptions.LiveFromStart)
+            return;
+
+        if (!SelectedSteams.Any(HasSegmentWithImplicitHlsIV))
+            return;
+
+        var disabledOptions = new List<string>();
+        if (DownloaderConfig.MyOptions.LiveFillSegmentsGap)
+        {
+            DownloaderConfig.MyOptions.LiveFillSegmentsGap = false;
+            disabledOptions.Add("--live-fill-segments-gap");
+        }
+
+        if (DownloaderConfig.MyOptions.LiveFromStart)
+        {
+            DownloaderConfig.MyOptions.LiveFromStart = false;
+            disabledOptions.Add("--live-from-start");
+        }
+
+        if (disabledOptions.Count > 0)
+        {
+            Logger.WarnMarkUp($"[darkorange3_1]{string.Join(" and ", disabledOptions)} disabled because AES-128 segments use HLS default IVs derived from media sequence.[/]");
+        }
+    }
+
+    private static bool HasSegmentWithImplicitHlsIV(StreamSpec streamSpec)
+    {
+        var playlist = streamSpec.Playlist;
+        if (playlist == null)
+            return false;
+
+        if (playlist.MediaInit != null && HasImplicitHlsIV(playlist.MediaInit))
+            return true;
+
+        return playlist.MediaParts.Any(part => part.MediaSegments.Any(HasImplicitHlsIV));
+    }
+
+    private static bool HasImplicitHlsIV(MediaSegment segment)
+    {
+        return segment.EncryptInfo.Method == EncryptMethod.AES_128
+               && segment.EncryptInfo.IV != null
+               && !segment.EncryptInfo.HasExplicitIV;
     }
 
     // 从文件读取KEY
@@ -643,6 +692,12 @@ internal class SimpleLiveRecordManager2
                 }
 
                 var output = Path.Combine(saveDir, saveName + outputExt);
+                MuxFormat? livePipeMuxFormat = null;
+                if (DownloaderConfig.MyOptions.LivePipeMux && streamSpec.MediaType != MediaType.SUBTITLES)
+                {
+                    livePipeMuxFormat = GetLivePipeMuxFormat();
+                    output = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(livePipeMuxFormat.Value));
+                }
 
                 // 移除无效片段
                 var badKeys = FileDic.Where(i => i.Value == null).Select(i => i.Key);
@@ -669,8 +724,15 @@ internal class SimpleLiveRecordManager2
                     else
                     {
                         // 创建管道
-                        var muxFormat = GetLivePipeMuxFormat();
-                        output = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(muxFormat));
+                        var muxFormat = livePipeMuxFormat ?? GetLivePipeMuxFormat();
+                        var muxOutput = Path.ChangeExtension(output, OtherUtil.GetMuxExtension(muxFormat));
+                        var finalMuxOutput = OtherUtil.HandlePathCollision(muxOutput, streamSpec);
+                        if (finalMuxOutput != muxOutput)
+                        {
+                            Logger.WarnMarkUp($"{Path.GetFileName(muxOutput)} => {Path.GetFileName(finalMuxOutput)}");
+                            muxOutput = finalMuxOutput;
+                        }
+                        output = muxOutput;
                         var pipeName = $"RE_pipe_{Guid.NewGuid()}";
                         fileOutputStream = PipeUtil.CreatePipe(pipeName);
                         Logger.InfoMarkUp($"{ResString.namedPipeCreated} [cyan]{pipeName.EscapeMarkup()}[/]");
@@ -888,6 +950,7 @@ internal class SimpleLiveRecordManager2
                 if (!STOP_FLAG)
                 {
                     await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList());
+                    DisableLiveSynthesisForImplicitIV();
                     await UpdateRawM3u8Async();
                 }
             }
@@ -975,7 +1038,7 @@ internal class SimpleLiveRecordManager2
         rawM3u8Content = initialContent;
         rawM3u8EndListWritten = parsed.HasEndList;
         rawM3u8SegmentIds.Clear();
-        rawM3u8StateLines.Clear();
+        rawM3u8CurrentStateLines.Clear();
         CollectRawM3u8StateLines(initialContent);
 
         foreach (var segment in parsed.Segments)
@@ -996,8 +1059,19 @@ internal class SimpleLiveRecordManager2
 
         foreach (var line in blockLines)
         {
-            if (IsRawM3u8StateLine(line) && !rawM3u8StateLines.Add(line))
+            if (TryGetRawM3u8StateLineKey(line, out var stateKey))
+            {
+                if (rawM3u8CurrentStateLines.TryGetValue(stateKey, out var currentStateLine) && currentStateLine == line)
+                    continue;
+
+                rawM3u8CurrentStateLines[stateKey] = line;
+            }
+
+            if (IsRawM3u8StateLine(line))
+            {
+                filteredLines.Add(line);
                 continue;
+            }
 
             filteredLines.Add(line);
         }
@@ -1022,8 +1096,8 @@ internal class SimpleLiveRecordManager2
     {
         foreach (var line in ReadRawM3u8Lines(rawM3u8))
         {
-            if (IsRawM3u8StateLine(line))
-                rawM3u8StateLines.Add(line);
+            if (TryGetRawM3u8StateLineKey(line, out var stateKey))
+                rawM3u8CurrentStateLines[stateKey] = line;
         }
     }
 
@@ -1098,6 +1172,24 @@ internal class SimpleLiveRecordManager2
     {
         return line.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal)
                || line.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal);
+    }
+
+    private static bool TryGetRawM3u8StateLineKey(string line, out string stateKey)
+    {
+        if (line.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal))
+        {
+            stateKey = "#EXT-X-KEY";
+            return true;
+        }
+
+        if (line.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal))
+        {
+            stateKey = "#EXT-X-MAP";
+            return true;
+        }
+
+        stateKey = string.Empty;
+        return false;
     }
 
     private static bool IsRawM3u8SegmentBlockLine(string line)
@@ -2279,6 +2371,7 @@ internal class SimpleLiveRecordManager2
                 Method = template.EncryptInfo.Method,
                 Key = template.EncryptInfo.Key,
                 IV = template.EncryptInfo.IV != null ? (byte[])template.EncryptInfo.IV.Clone() : null,
+                HasExplicitIV = template.EncryptInfo.HasExplicitIV,
             },
         };
     }
@@ -2387,6 +2480,8 @@ internal class SimpleLiveRecordManager2
 
     public async Task<bool> StartRecordAsync()
     {
+        DisableLiveSynthesisForImplicitIV();
+
         var takeLastCount = DownloaderConfig.MyOptions.LiveFromStart ? int.MaxValue : DownloaderConfig.MyOptions.LiveTakeCount;
         ConcurrentDictionary<int, SpeedContainer> SpeedContainerDic = new(); // 速度计算
         ConcurrentDictionary<StreamSpec, bool?> Results = new();
