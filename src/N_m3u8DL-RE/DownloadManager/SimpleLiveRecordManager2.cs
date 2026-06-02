@@ -1340,7 +1340,7 @@ internal class SimpleLiveRecordManager2
             // 由于派发有前瞻（领先提交），快速跳过模式可能把少量"干净区首片"也按单 host 处理而误判为空洞，
             // 故收尾时对"边界处未做兜底的可疑空洞"再统一复核（见下），保证不会误截断干净连续段。
             var raggedEnterFailures = Math.Max(3, threadCount / 3); // 连续失败达到此数 -> 进入快速跳过
-            var raggedExitSuccesses = backfillParallel;             // 连续成功达到此数 -> 退出快速跳过
+            var raggedExitSuccesses = Math.Min(12, threadCount);    // 连续成功达到此数 -> 退出快速跳过
             var consecutiveFailures = 0;
             var consecutiveSuccesses = 0;
             var raggedFastSkip = false;
@@ -1529,12 +1529,16 @@ internal class SimpleLiveRecordManager2
                             TryDeleteDownloadResult(res);
                         rolledBackDuration += seg.Duration;
                     }
-                    // 回退进度条与已刷新时长（这些碎片不计入最终可用产物）
+                    // 回退进度条与已刷新时长（这些碎片不计入最终可用产物）。
+                    // 回填和实时下载并发更新同一个 ProgressTask，直接 Increment(-fragments.Count)
+                    // 可能扣到并未计入 Value 的临时碎片，导致 Recording 计数出现负数。
+                    // 此处处于 LiveFromStart 首次合并前，FileDic 仍保存了当前可用产物，按它重新校准完成数。
                     lock (lockObj)
                     {
-                        task.MaxValue -= fragments.Count;
+                        task.MaxValue = Math.Max(0, task.MaxValue - fragments.Count);
+                        var completedCount = fileDic.Count(i => i.Value is { Success: true });
+                        task.Value = Math.Min(task.MaxValue, completedCount);
                     }
-                    task.Increment(-fragments.Count);
                     RefreshedDurDic.AddOrUpdate(task.Id, -rolledBackDuration, (_, old) => old - rolledBackDuration);
 
                     abandonedFragmentCount = fragments.Count;
