@@ -2,8 +2,16 @@ using N_m3u8DL_RE.Common.Util;
 using System.Globalization;
 using System.Text;
 
-namespace N_m3u8DL_RE.DownloadManager;
+namespace N_m3u8DL_RE.Util.LiveRecord;
 
+/// <summary>
+/// 直播录制时把每轮刷新到的原始媒体 playlist 增量累加成一份完整的 raw .m3u8 存档（保存 --write-meta-json 之外的原始清单）。
+///
+/// 存在需求：直播 playlist 是滑动窗口，每次只暴露一小段分片；若直接覆盖写出会丢失历史。
+/// 本累加器以分片唯一标识去重（优先用 EXT-X-MEDIA-SEQUENCE 号，回退到 URI），仅把新出现的分片块追加到文件末尾，
+/// 从而在整场直播结束后还原出一份连续的媒体 playlist。同时去除重复的状态行（EXT-X-KEY/MAP），并在收到 ENDLIST 后封口。
+/// 维护可恢复状态（已落盘内容、已写 ID、当前 KEY/MAP），因此是有状态实例而非纯工具。
+/// </summary>
 internal sealed class LiveRawM3u8Accumulator
 {
     private readonly HashSet<string> segmentIds = new(StringComparer.Ordinal);
@@ -11,9 +19,15 @@ internal sealed class LiveRawM3u8Accumulator
     private string? content;
     private bool endListWritten;
 
+    /// <summary>单个分片块：去重用的标识 + 该块包含的所有清单行。</summary>
     private readonly record struct SegmentBlock(string Id, string[] Lines);
+    /// <summary>一次解析结果：解析出的分片块序列，以及是否出现了 EXT-X-ENDLIST。</summary>
     private readonly record struct ParseResult(List<SegmentBlock> Segments, bool HasEndList);
 
+    /// <summary>
+    /// 用本轮刷新到的原始清单更新存档：首轮初始化（可从已有文件断点续写），之后只把新分片块追加落盘。
+    /// 已写入 ENDLIST 后视为收尾，后续调用直接忽略。
+    /// </summary>
     public async Task UpdateAsync(string file, string rawM3u8)
     {
         if (content == null)
@@ -49,6 +63,10 @@ internal sealed class LiveRawM3u8Accumulator
         content += appendText;
     }
 
+    /// <summary>
+    /// 首轮初始化存档：若目标文件已有可解析的历史内容则续写其后（断点续录），否则以本轮清单为基底写入。
+    /// 同时建立去重所需的初始状态（已写分片 ID、当前 KEY/MAP 行、是否已 ENDLIST）。
+    /// </summary>
     private async Task InitializeAsync(string file, string rawM3u8)
     {
         var initialContent = Normalize(rawM3u8);
@@ -86,6 +104,7 @@ internal sealed class LiveRawM3u8Accumulator
         }
     }
 
+    /// <summary>过滤分片块内的行：丢弃与当前生效值重复的状态行（EXT-X-KEY/MAP），仅在状态变化时保留，避免存档膨胀。</summary>
     private List<string> FilterSegmentBlockLines(IEnumerable<string> blockLines)
     {
         var filteredLines = new List<string>();
@@ -106,6 +125,7 @@ internal sealed class LiveRawM3u8Accumulator
         return filteredLines;
     }
 
+    /// <summary>把待追加行拼成文本：必要时先补一个换行，确保与既有内容之间不会粘连成同一行。</summary>
     private string BuildAppendText(IReadOnlyList<string> appendedLines)
     {
         var builder = new StringBuilder();
@@ -119,6 +139,7 @@ internal sealed class LiveRawM3u8Accumulator
         return builder.ToString();
     }
 
+    /// <summary>从已落盘内容中收集当前生效的状态行（KEY/MAP），作为后续去重比对的基线。</summary>
     private void CollectStateLines(string rawM3u8)
     {
         foreach (var line in ReadLines(rawM3u8))
@@ -128,6 +149,10 @@ internal sealed class LiveRawM3u8Accumulator
         }
     }
 
+    /// <summary>
+    /// 把原始清单切成分片块序列：以 EXTINF 等标签 + 紧随的 URI 行聚合为一块，
+    /// 并据 MEDIA-SEQUENCE 号（有则用 seq:，无则回退 uri:）赋予稳定的去重标识。非媒体 playlist（如主清单）返回空。
+    /// </summary>
     private static ParseResult Parse(string rawM3u8)
     {
         if (!LooksLikeMediaPlaylist(rawM3u8))
@@ -185,6 +210,7 @@ internal sealed class LiveRawM3u8Accumulator
         return new ParseResult(segments, hasEndList);
     }
 
+    /// <summary>粗判是否为媒体级 playlist：含主清单标记（STREAM-INF）直接排除，否则看是否含 EXTINF / MEDIA-SEQUENCE / TARGETDURATION。</summary>
     private static bool LooksLikeMediaPlaylist(string rawM3u8)
     {
         if (rawM3u8.Contains("#EXT-X-STREAM-INF", StringComparison.Ordinal))
@@ -195,6 +221,7 @@ internal sealed class LiveRawM3u8Accumulator
                || rawM3u8.Contains("#EXT-X-TARGETDURATION:", StringComparison.Ordinal);
     }
 
+    /// <summary>识别「状态行」（EXT-X-KEY / EXT-X-MAP）并给出其去重键；这类行表示持续生效状态，需单独跟踪以便去重。</summary>
     private static bool TryGetStateLineKey(string line, out string stateKey)
     {
         if (line.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal))
@@ -213,6 +240,7 @@ internal sealed class LiveRawM3u8Accumulator
         return false;
     }
 
+    /// <summary>判断该行是否属于分片块的组成标签（EXTINF/BYTERANGE/PROGRAM-DATE-TIME/DISCONTINUITY/KEY/MAP 等）。</summary>
     private static bool IsSegmentBlockLine(string line)
     {
         return line.StartsWith("#EXTINF", StringComparison.Ordinal)
@@ -226,11 +254,13 @@ internal sealed class LiveRawM3u8Accumulator
                || TryGetStateLineKey(line, out _);
     }
 
+    /// <summary>规整原始清单：去掉空行/首尾空白并统一为本机换行，作为存档基底，保证后续追加格式一致。</summary>
     private static string Normalize(string rawM3u8)
     {
         return string.Join(Environment.NewLine, ReadLines(rawM3u8));
     }
 
+    /// <summary>逐行读取并 Trim，跳过空行；统一各处的清单遍历入口。</summary>
     private static IEnumerable<string> ReadLines(string rawM3u8)
     {
         using var reader = new StringReader(rawM3u8);
