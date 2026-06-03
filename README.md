@@ -135,7 +135,7 @@ Options:
   --decryption-engine <FFMPEG|MP4DECRYPT|SHAKA_PACKAGER>  设置解密时使用的第三方程序 [default: MP4DECRYPT]
   --decryption-binary-path <PATH>                         MP4解密所用工具的全路径, 例如 C:\Tools\mp4decrypt.exe
   --mp4-real-time-decryption                              实时解密MP4分片 [default: False]
-  -R, --max-speed <SPEED>                                 设置限速，单位支持 Mbps 或 Kbps，如：15M 100K
+  -R, --max-speed <SPEED>                                 设置限速，单位为 MiB/s 或 KiB/s，如：15M=15MiB/s，100K=100KiB/s
   -M, --mux-after-done <OPTIONS>                          所有工作完成时尝试混流分离的音视频. 输入 "--morehelp mux-after-done" 以查看详细信息
   --custom-hls-method <METHOD>                            指定HLS加密方式 (AES_128|AES_128_ECB|CENC|CHACHA20|NONE|SAMPLE_AES|SAMPLE_AES_CTR|UNKNOWN)
   --custom-hls-key <FILE|HEX|BASE64>                      指定HLS解密KEY. 可以是文件, HEX或Base64

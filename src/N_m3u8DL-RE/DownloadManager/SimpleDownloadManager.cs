@@ -647,6 +647,7 @@ internal class SimpleDownloadManager
     {
         ConcurrentDictionary<int, SpeedContainer> SpeedContainerDic = new(); // 速度计算
         ConcurrentDictionary<StreamSpec, bool?> Results = new();
+        var speedLimiter = DownloaderConfig.MyOptions.MaxSpeed is long maxSpeed ? new SpeedLimiter(maxSpeed) : null;
 
         var progress = CustomAnsiConsole.Console.Progress().AutoClear(true);
         progress.AutoRefresh = DownloaderConfig.MyOptions.LogLevel != LogLevel.OFF;
@@ -678,12 +679,7 @@ internal class SimpleDownloadManager
             {
                 var description = item.ToShortShortString();
                 var task = ctx.AddTask(description, autoStart: false);
-                SpeedContainerDic[task.Id] = new SpeedContainer(); // 速度计算
-                // 限速设置
-                if (DownloaderConfig.MyOptions.MaxSpeed != null)
-                {
-                    SpeedContainerDic[task.Id].SpeedLimit = DownloaderConfig.MyOptions.MaxSpeed.Value;
-                }
+                SpeedContainerDic[task.Id] = new SpeedContainer(speedLimiter); // 速度计算
                 return (item, task);
             }).ToDictionary(item => item.item, item => item.task);
 

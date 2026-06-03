@@ -135,7 +135,7 @@ Options:
   --decryption-engine <FFMPEG|MP4DECRYPT|SHAKA_PACKAGER>  Set the third-party program used for decryption [default: MP4DECRYPT]
   --decryption-binary-path <PATH>                         Full path to the tool used for MP4 decryption, like C:\Tools\mp4decrypt.exe
   --mp4-real-time-decryption                              Decrypt MP4 segments in real time [default: False]
-  -R, --max-speed <SPEED>                                 Set speed limit, Mbps or Kbps, for example: 15M 100K.
+  -R, --max-speed <SPEED>                                 Set speed limit in MiB/s or KiB/s, e.g. 15M=15MiB/s, 100K=100KiB/s.
   -M, --mux-after-done <OPTIONS>                          When all works is done, try to mux the downloaded streams. Use "--morehelp mux-after-done" for more details
   --custom-hls-method <METHOD>                            Set HLS encryption method (AES_128|AES_128_ECB|CENC|CHACHA20|NONE|SAMPLE_AES|SAMPLE_AES_CTR|UNKNOWN)
   --custom-hls-key <FILE|HEX|BASE64>                      Set the HLS decryption key. Can be file, HEX or Base64

@@ -150,9 +150,9 @@ internal static class StaticText
         ),
         ["cmd_maxSpeed"] = new TextContainer
         (
-            zhCN: "设置限速，单位支持 Mbps 或 Kbps，如：15M 100K",
-            zhTW: "設置限速，單位支持 Mbps 或 Kbps，如：15M 100K",
-            enUS: "Set speed limit, Mbps or Kbps, for example: 15M 100K."
+            zhCN: "设置限速，单位为 MiB/s 或 KiB/s，如：15M=15MiB/s，100K=100KiB/s",
+            zhTW: "設置限速，單位為 MiB/s 或 KiB/s，如：15M=15MiB/s，100K=100KiB/s",
+            enUS: "Set speed limit in MiB/s or KiB/s, e.g. 15M=15MiB/s, 100K=100KiB/s."
         ),
         ["cmd_noDateInfo"] = new TextContainer
         (

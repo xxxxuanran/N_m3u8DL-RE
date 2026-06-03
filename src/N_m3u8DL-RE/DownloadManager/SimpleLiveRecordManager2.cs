@@ -1490,6 +1490,7 @@ internal class SimpleLiveRecordManager2
         var takeLastCount = DownloaderConfig.MyOptions.LiveFromStart ? int.MaxValue : DownloaderConfig.MyOptions.LiveTakeCount;
         ConcurrentDictionary<int, SpeedContainer> SpeedContainerDic = new(); // 速度计算
         ConcurrentDictionary<StreamSpec, bool?> Results = new();
+        var speedLimiter = DownloaderConfig.MyOptions.MaxSpeed is long maxSpeed ? new SpeedLimiter(maxSpeed) : null;
         // 同步流
         FilterUtil.SyncStreams(SelectedSteams, takeLastCount);
         ResolveLiveRefreshInterval();
@@ -1518,12 +1519,7 @@ internal class SimpleLiveRecordManager2
             foreach (var item in SelectedSteams)
             {
                 var task = ctx.AddTask(item.ToShortShortString(), autoStart: false, maxValue: 0);
-                SpeedContainerDic[task.Id] = new SpeedContainer(); // 速度计算
-                // 限速设置
-                if (DownloaderConfig.MyOptions.MaxSpeed != null)
-                {
-                    SpeedContainerDic[task.Id].SpeedLimit = DownloaderConfig.MyOptions.MaxSpeed.Value;
-                }
+                SpeedContainerDic[task.Id] = new SpeedContainer(speedLimiter); // 速度计算
                 LastFileNameDic[task.Id] = "";
                 RecordLimitReachedDic[task.Id] = false;
                 DateTimeDic[task.Id] = 0L;

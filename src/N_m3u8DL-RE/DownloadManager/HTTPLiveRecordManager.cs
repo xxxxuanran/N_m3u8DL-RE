@@ -77,7 +77,7 @@ internal class HTTPLiveRecordManager
         var output = Path.Combine(saveDir, saveName + ".ts");
         using var stream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
         using var responseStream = await response.Content.ReadAsStreamAsync(CancellationTokenSource.Token);
-        var buffer = new byte[16 * 1024];
+        var buffer = new byte[speedContainer.GetDownloadBufferSize()];
         var size = 0;
 
         // 计时器
@@ -96,6 +96,7 @@ internal class HTTPLiveRecordManager
                 speedContainer.Add(size);
                 RecordingSizeDic[task.Id] += size;
                 await stream.WriteAsync(buffer, 0, size);
+                await speedContainer.WaitForSpeedLimitAsync(size, CancellationTokenSource.Token);
             }
         }
         catch (OperationCanceledException oce) when (oce.CancellationToken == CancellationTokenSource.Token)
@@ -193,6 +194,7 @@ internal class HTTPLiveRecordManager
     {
         ConcurrentDictionary<int, SpeedContainer> SpeedContainerDic = new(); // 速度计算
         ConcurrentDictionary<StreamSpec, bool?> Results = new();
+        var speedLimiter = DownloaderConfig.MyOptions.MaxSpeed is long maxSpeed ? new SpeedLimiter(maxSpeed) : null;
 
         var progress = CustomAnsiConsole.Console.Progress().AutoClear(true);
         progress.AutoRefresh = DownloaderConfig.MyOptions.LogLevel != LogLevel.OFF;
@@ -219,7 +221,7 @@ internal class HTTPLiveRecordManager
             var dic = SelectedSteams.Select(item =>
             {
                 var task = ctx.AddTask(item.ToShortString(), autoStart: false, maxValue: 0);
-                SpeedContainerDic[task.Id] = new SpeedContainer(); // 速度计算
+                SpeedContainerDic[task.Id] = new SpeedContainer(speedLimiter); // 速度计算
                 RecordingDurDic[task.Id] = 0;
                 RecordingSizeDic[task.Id] = 0;
                 return (item, task);

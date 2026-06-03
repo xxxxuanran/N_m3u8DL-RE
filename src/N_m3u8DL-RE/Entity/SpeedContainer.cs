@@ -2,11 +2,17 @@ namespace N_m3u8DL_RE.Entity;
 
 internal class SpeedContainer
 {
+    private const int DefaultDownloadBufferSize = 16 * 1024;
+
     public bool SingleSegment { get; set; } = false;
     public long NowSpeed { get; set; } = 0L; // 当前每秒速度
-    public long SpeedLimit { get; set; } = long.MaxValue; // 限速设置
+    public long SpeedLimit
+    {
+        get => _speedLimiter.Limit;
+        set => _speedLimiter = new SpeedLimiter(value);
+    }
     public long? ResponseLength { get; set; }
-    public long RDownloaded => _Rdownloaded;
+    public long RDownloaded => Interlocked.Read(ref _Rdownloaded);
     private int _zeroSpeedCount = 0;
     public int LowSpeedCount => _zeroSpeedCount;
     public bool ShouldStop => LowSpeedCount >= 20;
@@ -15,7 +21,18 @@ internal class SpeedContainer
 
     private long _downloaded = 0;
     private long _Rdownloaded = 0;
-    public long Downloaded => _downloaded;
+    private SpeedLimiter _speedLimiter;
+    public long Downloaded => Interlocked.Read(ref _downloaded);
+
+    public SpeedContainer()
+        : this(null)
+    {
+    }
+
+    public SpeedContainer(SpeedLimiter? speedLimiter)
+    {
+        _speedLimiter = speedLimiter ?? new SpeedLimiter(long.MaxValue);
+    }
 
     public int AddLowSpeedCount()
     {
@@ -33,9 +50,24 @@ internal class SpeedContainer
         return Interlocked.Add(ref _downloaded, size);
     }
 
-    public void Reset()
+    public int GetDownloadBufferSize(int defaultSize = DefaultDownloadBufferSize)
     {
-        Interlocked.Exchange(ref _downloaded, 0);
+        return _speedLimiter.GetDownloadBufferSize(defaultSize);
+    }
+
+    public ValueTask WaitForSpeedLimitAsync(long size, CancellationToken cancellationToken = default)
+    {
+        return _speedLimiter.WaitAsync(size, cancellationToken);
+    }
+
+    internal TimeSpan ReserveSpeedLimitDelay(long size, long timestamp)
+    {
+        return _speedLimiter.ReserveDelay(size, timestamp);
+    }
+
+    public long Reset()
+    {
+        return Interlocked.Exchange(ref _downloaded, 0);
     }
 
     public void ResetVars()
@@ -44,6 +76,6 @@ internal class SpeedContainer
         ResetLowSpeedCount();
         SingleSegment = false;
         ResponseLength = null;
-        _Rdownloaded = 0L;
+        Interlocked.Exchange(ref _Rdownloaded, 0L);
     }
 }

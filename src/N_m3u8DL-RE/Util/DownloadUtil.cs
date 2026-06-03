@@ -103,12 +103,13 @@ internal static class DownloadUtil
 
             using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
             using var responseStream = await response.Content.ReadAsStreamAsync(cancellationTokenSource.Token);
-            var buffer = new byte[16 * 1024];
+            var buffer = new byte[speedContainer.GetDownloadBufferSize()];
             var size = 0;
 
             size = await responseStream.ReadAsync(buffer, cancellationTokenSource.Token);
             speedContainer.Add(size);
-            await stream.WriteAsync(buffer.AsMemory(0, size));
+            await stream.WriteAsync(buffer.AsMemory(0, size), cancellationTokenSource.Token);
+            await speedContainer.WaitForSpeedLimitAsync(size, cancellationTokenSource.Token);
             // 检测imageHeader
             bool imageHeader = ImageHeaderUtil.IsImageHeader(buffer);
             // 检测GZip（For DDP Audio）
@@ -117,12 +118,8 @@ internal static class DownloadUtil
             while ((size = await responseStream.ReadAsync(buffer, cancellationTokenSource.Token)) > 0)
             {
                 speedContainer.Add(size);
-                await stream.WriteAsync(buffer.AsMemory(0, size));
-                // 限速策略
-                while (speedContainer.Downloaded > speedContainer.SpeedLimit)
-                {
-                    await Task.Delay(1);
-                }
+                await stream.WriteAsync(buffer.AsMemory(0, size), cancellationTokenSource.Token);
+                await speedContainer.WaitForSpeedLimitAsync(size, cancellationTokenSource.Token);
             }
 
             return new DownloadResult()
