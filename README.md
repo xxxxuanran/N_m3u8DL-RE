@@ -26,7 +26,7 @@
 | macOS x64 | `N_m3u8DL-RE_v0.6.2-beta_osx-x64_*.tar.gz` |
 | macOS arm64 | `N_m3u8DL-RE_v0.6.2-beta_osx-arm64_*.tar.gz` |
 
-Linux 产物为 musl 完全静态链接，可在多数发行版上直接运行。正式 Release 构建启动时版本示例：`N_m3u8DL-RE (Beta version) 20260601+v0.6.2-beta`；在非 tag 提交上本地编译时可能显示 `yyyyMMdd+<commit>`。
+Linux 产物为 musl 完全静态链接，可在多数发行版上直接运行。正式 Release 构建启动时版本示例：`N_m3u8DL-RE (Beta version) 20260603+v0.6.2-beta`；在非 tag 提交上本地编译时可能显示 `yyyyMMdd+<commit>`。
 
 ---
 
@@ -57,8 +57,7 @@ yay -Syu n-m3u8dl-re-git
 | `--live-host-mirror <HOST>` | 为直播分片配置镜像 Host，主 URL 与各镜像**并发拉取**，采用最先成功的结果。可重复指定；支持 `hostname`、`host:port` 或完整 `http(s)://` URL。 |
 | `--live-from-start` | 录制直播时，对可预测的分片尽力向前回溯；每生成一个历史分片文件名就立即完整下载，直到回溯下载失败。 |
 | `--live-keep-m3u8-updated` | 录制直播时持续更新 `raw.m3u8`，不包含补洞内容。 |
-| `--live-fill-segments-gap` | 刷新播放列表出现序号间隙时，按连续数字规律**自动补齐**缺失分片（默认开启）。仅在首次 media playlist 确认各 segment URL query 一致时才会补齐。 |
-| `--live-fill-segments-gap-max <NUM>` | 单次自动补齐允许填补的最大分片数量。未指定时默认为 `max(1, min(60, ceil(60/wait_time)))`，其中 `wait_time` 为刷新间隔秒数，也可由 `--live-wait-time` 覆盖。 |
+| `--live-fill-segments-gap` | 刷新播放列表出现序号间隙时，按连续数字规律**自动补齐**缺失分片（默认开启）。仅当初始 media playlist 的分片 URL query 一致、文件名数字严格递增且数字匹配分片序号时启用。大缺口会按 `EXT-X-TARGETDURATION` 裁剪到靠近直播边缘的有限窗口，避免一次性展开海量待补分片。 |
 | `--live-restart-on-ext-map-change` | 检测到 `EXT-X-MAP`（初始化分片）变化时，**收尾当前文件并以新 init 分片继续录制**（默认开启）。设为 `false` 时改为直接停止录制（与上游旧行为接近）。 |
 
 #### 输出与网络
@@ -72,16 +71,17 @@ yay -Syu n-m3u8dl-re-git
 
 #### 其他改进
 
-- 支持 **bilibili** 相关 DRM 密钥类型（`bilidrm`）。
+- HLS Key URI 遇到外部 DRM scheme（`bili://`、`skd://`、`uri:skd://`）时会识别并跳过普通 KEY 加载，避免把不支持的 scheme 当作 HTTP key 请求。
 - 修复相同参数重复启动时**临时目录冲突**的问题。
 - Release 构建提供 **Linux musl 完全静态**二进制（见上方「下载」表格）。
 - 直播实时合并时 fmp4 init 分片**只写入一次**，避免重复头数据。
 - 改进 mux 输出命名与最终重命名的安全性。
-- 直播 gap fill 在首次 media playlist 确认各 segment **URL query 一致**后才启用，避免误补分片。
+- 直播 gap fill 在初始 media playlist 确认各 segment **URL query 一致、文件名数字匹配序号、序号严格递增**后才启用，避免误补分片。
+
 
 ```
 Description:
-  N_m3u8DL-RE (Beta version) 20260601+v0.6.2-beta
+  N_m3u8DL-RE (Beta version) 20260603+759fcaa
 
 Usage:
   N_m3u8DL-RE <input> [options]
@@ -153,7 +153,7 @@ Options:
   --live-perform-as-vod                                   以点播方式下载直播流 [default: False]
   --live-real-time-merge                                  录制直播时实时合并 [default: False]
   --live-keep-segments                                    录制直播并开启实时合并时依然保留分片 [default: True]
-  --live-pipe-mux                                         录制直播并开启实时合并时通过管道+ffmpeg实时混流到TS文件 [default: False]
+  --live-pipe-mux <OPTIONS>                               录制直播并开启实时合并时通过管道+ffmpeg实时混流. 输入 "--morehelp live-pipe-mux" 以查看详细信息
   --live-fix-vtt-by-audio                                 通过读取音频文件的起始时间修正VTT字幕 [default: False]
   --live-host-mirror <HOST>                               录制直播时额外镜像 host；每个分片同时从主 URL 与各镜像拉取，采用最先成功完成的副本。可重复指定。支持 hostname、host:port 或完整 http(s) URL。
   --live-record-limit <HH:mm:ss>                          录制直播时的录制时长限制
@@ -162,7 +162,6 @@ Options:
   --live-from-start                                       录制直播时，对可预测的分片尽力向前回溯；每生成一个历史分片文件名就立即完整下载，直到回溯下载失败 [default: False]
   --live-keep-m3u8-updated                                录制直播时持续更新 raw.m3u8，不包含补洞内容 [default: False]
   --live-fill-segments-gap                                录制直播刷新播放列表出现间隙时，按可预测的连续数字命名规律自动补齐缺失的分片 [default: True]
-  --live-fill-segments-gap-max <NUM>                      录制直播自动补齐缺失分片时允许补齐的最大数量；未指定时默认为 max(1, min(60, ceil(60/wait_time)))，wait_time 为刷新间隔秒数（可由 --live-wait-time 指定）
   --live-restart-on-ext-map-change                        录制直播时若检测到EXT-X-MAP变动，自动收尾当前输出并以新的初始化分片重启录制；关闭时将直接停止录制 [default: True]
   --mux-import <OPTIONS>                                  混流时引入外部媒体文件. 输入 "--morehelp mux-import" 以查看详细信息
   -sv, --select-video <OPTIONS>                           通过正则表达式选择符合要求的视频流. 输入 "--morehelp select-video" 以查看详细信息
@@ -189,7 +188,7 @@ More Help:
 
 所有工作完成时尝试混流分离的音视频. 你能够以:分隔形式指定如下参数:
 
-* format=FORMAT: 指定混流容器 mkv, mp4
+* format=FORMAT: 指定混流容器 mkv, mp4, ts, flv
 * muxer=MUXER: 指定混流程序 ffmpeg, mkvmerge (默认: ffmpeg)
 * bin_path=PATH: 指定程序路径 (默认: 自动寻找)
 * skip_sub=BOOL: 是否忽略字幕文件 (默认: false)
@@ -202,6 +201,25 @@ More Help:
 -M format=mkv:muxer=mkvmerge
 # 使用mkvmerge, 自定义程序路径
 -M format=mkv:muxer=mkvmerge:bin_path="C\:\Program Files\MKVToolNix\mkvmerge.exe"
+```
+
+```
+More Help:
+
+  --live-pipe-mux
+
+录制直播并开启实时合并时通过管道+ffmpeg实时混流. 你能够以:分隔形式指定如下参数:
+
+* format=FORMAT: 指定混流容器 mkv, mp4, ts, flv (未指定时 fMP4 输入默认 mp4，其余默认 ts)
+* bin_path=PATH: 指定 ffmpeg 路径 (默认: 自动寻找)
+
+例如:
+# 使用默认格式
+--live-pipe-mux
+# 混流为 mkv 容器
+--live-pipe-mux format=mkv
+# 混流为 mp4 并指定 ffmpeg 路径
+--live-pipe-mux format=mp4:bin_path="C\:\ffmpeg\bin\ffmpeg.exe"
 ```
 
 ```
@@ -230,8 +248,8 @@ More Help:
 通过正则表达式选择符合要求的视频流. 你能够以:分隔形式指定如下参数:
 
 id=REGEX:lang=REGEX:name=REGEX:codecs=REGEX:res=REGEX:frame=REGEX
-segsMin=number:segsMax=number:ch=REGEX:range=REGEX:url=REGEX
-plistDurMin=hms:plistDurMax=hms:for=FOR
+segsMin=number:segsMax=number:channel=REGEX:range=REGEX:url=REGEX
+plistDurMin=hms:plistDurMax=hms:bwMin=int:bwMax=int:role=string:for=FOR
 
 * for=FOR: 选择方式. best[number], worst[number], all (默认: best)
 
@@ -242,6 +260,10 @@ plistDurMin=hms:plistDurMax=hms:for=FOR
 -sv res="3840*":codecs=hvc1:for=best
 # 选择长度大于1小时20分钟30秒的视频
 -sv plistDurMin="1h20m30s":for=best
+# 选择 main 角色视频
+-sv role="main":for=best
+# 选择码率在800Kbps至1Mbps之间的视频
+-sv bwMin=800:bwMax=1000
 ```
 
 ```
@@ -258,6 +280,8 @@ More Help:
 -sa lang=en:for=best
 # 选择最佳的2条英语(或日语)音轨
 -sa lang="ja|en":for=best2
+# 选择 main 角色音轨
+-sa role="main":for=best
 ```
 
 ```
@@ -309,6 +333,7 @@ More Help:
 * <FrameRate>: 帧率
 * <VideoRange>: 视频色域/HDR信息 (SDR, HDR10等)
 * <GroupId>: 流组标识符
+* <DateTime>: 时间戳，默认格式 `yyyy-MM-dd_HH-mm-ss`；也可写成 `<DateTime:yyyyMMdd>` 等 .NET 日期格式
 
 使用场景:
 当下载多个相同类型的流时(例如多个不同分辨率的视频)，使用此选项可以避免文件名冲突。
@@ -329,6 +354,9 @@ More Help:
 # 复杂模板
 --save-pattern "<MediaType>_<Resolution>_<Codecs>_<Language>"
 # 输出: VIDEO_1920x1080_avc1.64001f_en.mp4
+
+# 带日期的直播录制命名
+--save-pattern "<SaveName>_<DateTime:yyyyMMdd_HHmmss>_<Resolution>"
 
 注意:
 如果不使用 --save-pattern，程序会在文件名冲突时自动使用流的元数据(分辨率、带宽等)
@@ -370,10 +398,10 @@ flowchart TD
 
 配置镜像后，回溯各阶段会自动利用多 Host：
 
-- **探测阶段**：原始 URL + **前半数镜像**并发竞速，取最先成功者；定位边界更快更稳。
-- **升序回填**：锁定到"探测中胜出次数最多"的单一 Host 定向下载（不竞速、零冗余请求）；个别分片该 Host 恰好缺失时，对该片回退一次全量镜像竞速兜底。
-- **倒序回填**：直接全量镜像竞速。
-- 重试策略：配置了镜像时单分片重试 0 次（失败由其它 Host 竞速兜底），无镜像时重试 1 次。
+- **主直播下载**：原始 URL + 所有 `--live-host-mirror` 候选并发竞速，采用最先成功完成的副本。
+- **live-from-start / gap-fill 子任务**：会过滤空镜像并取配置列表的前半部分（至少 1 个）作为子任务镜像，候选集仍包含原始 URL；这样补洞不会占满所有镜像并发。
+- **探测、升序回填、倒序回填**：都通过同一套候选 URL 竞速下载，取最先成功者；当前代码没有锁定“探测胜出次数最多”的单一 Host。
+- **重试策略**：live-from-start 在有子任务镜像时单分片重试 0 次，无子任务镜像时重试 1 次；实时 gap-fill 使用 `--download-retry-count` 参与待补队列驱逐和滑动窗口判定。
 
 
 ## 运行截图
@@ -402,12 +430,12 @@ flowchart TD
 ffmpeg -readrate 1 -i 2022-09-21_19-54-42_V.mp4 -i 2022-09-21_19-54-42_V.chi.m4a -c copy 2022-09-21_19-54-42_V.ts
 ```
 
-从 v0.1.5 开始，可以尝试开启 `live-pipe-mux` 来代替以上命令
+可以尝试开启 `--live-pipe-mux` 来代替以上命令。当前代码支持 `--live-pipe-mux` 不带参数自动推断输出容器：fMP4 输入默认 `mp4`，其他输入默认 `ts`；也可以显式指定 `format=mkv|mp4|ts|flv` 和 `bin_path=...`，例如 `--live-pipe-mux format=mp4:bin_path="C\:\ffmpeg\bin\ffmpeg.exe"`。
 
 > [!NOTE]
 > 如果网络环境不够稳定，请不要开启 `live-pipe-mux`。管道内数据读取由 ffmpeg 负责，在某些环境下容易丢失直播数据。
 
-从 v0.1.8 开始，能够通过设置环境变量 `RE_LIVE_PIPE_OPTIONS` 来改变 `live-pipe-mux` 时 ffmpeg 的某些选项： <https://github.com/nilaoda/N_m3u8DL-RE/issues/162#issuecomment-1592462532>
+可以通过设置环境变量 `RE_LIVE_PIPE_OPTIONS` 改变 `live-pipe-mux` 时的 ffmpeg 输出目标或附加参数。代码中还定义了 `RE_LIVE_PIPE_TMP_DIR`，用于非 Windows 下 ffmpeg 读取 FIFO 的目录；当前 FIFO 创建仍使用系统临时目录，修改该变量时需确保两侧路径一致。
 
 ## 赞助
 
