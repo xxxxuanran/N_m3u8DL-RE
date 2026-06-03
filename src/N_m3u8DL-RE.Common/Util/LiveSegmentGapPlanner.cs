@@ -95,13 +95,13 @@ public static class LiveSegmentGapPlanner
     /// 滑动窗口（单位：分片数）。号落后直播边缘超过该窗口即判定 CDN 已滑出而放弃。
     /// 基准 = 缺片数 × --download-retry-count，并 clamp 到 [下限, 上限]：
     ///  - 下限 = Max(30, ceil(30 秒 / EXT-X-TARGETDURATION))，保证小缺口也有足够补救余量；
-    ///  - 上限 = Max(1800, ceil(1800 秒 / EXT-X-TARGETDURATION))，避免 pending 队列无限滞留。
+    ///  - 上限 = Max(3600, ceil(3600 秒 / EXT-X-TARGETDURATION))，避免 pending 队列无限滞留。
     /// </summary>
     public static long ComputeGapWindow(long missingCount, double targetDurationSeconds, int downloadRetryCount)
     {
         var td = double.IsFinite(targetDurationSeconds) && targetDurationSeconds > 0 ? targetDurationSeconds : 1d;
         var lower = Math.Max(30L, (long)Math.Ceiling(30d / td));
-        var upper = Math.Max(1800L, (long)Math.Ceiling(1800d / td));
+        var upper = Math.Max(3600L, (long)Math.Ceiling(3600d / td));
         var baseValue = Math.Max(0L, missingCount) * Math.Max(0L, downloadRetryCount);
         return Math.Min(Math.Max(baseValue, lower), upper);
     }

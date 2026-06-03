@@ -1402,7 +1402,7 @@ internal class SimpleLiveRecordManager2
 
         if (firstFilled != null && lastFilled != null)
         {
-            Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segment(s) in predictable URL pattern ({FormatMissingSegmentRanges(missingRanges)}), filling.[/]");
+            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: detected {missingCount} missing segment(s) in predictable URL pattern ({FormatMissingSegmentRanges(missingRanges)}), filling.[/]");
         }
 
         return result;

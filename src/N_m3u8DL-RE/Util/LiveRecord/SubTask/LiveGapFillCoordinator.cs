@@ -35,6 +35,7 @@ internal sealed class LiveGapFillCoordinator(
     private readonly ConcurrentDictionary<int, long> lastMergedNumberDic = new();
     private readonly ConcurrentDictionary<int, (long BlockNumber, DateTime Since)> mergeHoldDic = new();
     private readonly ConcurrentDictionary<int, LiveGapStats> gapStatsDic = new();
+    private readonly ConcurrentDictionary<int, LiveGapFillBatchTracker> gapBatchTrackers = new();
 
     /// <summary>待补缺口的单项状态：已尝试次数（用于有界重试驱逐）、滑动窗口大小、是否已计入进度总量。</summary>
     private sealed class PendingGapEntry
@@ -42,6 +43,7 @@ internal sealed class LiveGapFillCoordinator(
         public int Attempts;
         public long Window;
         public bool CountedInPlaylist;
+        public readonly HashSet<long> BatchIds = [];
     }
 
     /// <summary>单条流的缺口补齐统计：已补齐 / 已延后 / 最终丢失（散号 + 压缩区间），用于收尾日志。</summary>
@@ -67,6 +69,7 @@ internal sealed class LiveGapFillCoordinator(
         pendingGapNumbersDic[taskId] = new SortedDictionary<long, PendingGapEntry>();
         lastMergedNumberDic[taskId] = 0L;
         gapStatsDic[taskId] = new LiveGapStats();
+        gapBatchTrackers[taskId] = new LiveGapFillBatchTracker();
     }
 
     /// <summary>取该流的 URL 可预测性判定，并要求三项条件（查询串一致 / 号==Index / 严格递增）全部成立。</summary>
@@ -169,7 +172,7 @@ internal sealed class LiveGapFillCoordinator(
                 LiveSegmentGapPlanner.ComputeGapWindow(range.Count, gapWindowTd, gapWindowRetryCount),
                 countedInPlaylist: false,
                 targetDurationSeconds: gapWindowTd);
-            Logger.WarnMarkUp($"[darkorange3_1]Detected {range.Count} missing segment(s) in predictable URL pattern ({range.Start} ~ {range.End}); deferred to subTask fill queue.[/]");
+            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: detected {range.Count} missing segment(s) in predictable URL pattern ({range.Start} ~ {range.End}); deferred to subTask fill queue.[/]");
         }
 
         var result = new List<MediaSegment>(plan.FreshNumbers.Count);
@@ -215,6 +218,8 @@ internal sealed class LiveGapFillCoordinator(
             var evict = pending.Where(kv => LiveSegmentGapPlanner.ShouldEvictByWindow(hwm, kv.Key, kv.Value.Window)).Select(kv => kv.Key).ToList();
             foreach (var n in evict)
             {
+                if (pending.TryGetValue(n, out var entry))
+                    MarkBatchesLost(task.Id, entry.BatchIds);
                 pending.Remove(n);
                 RecordLostGap(task.Id, n);
             }
@@ -258,6 +263,7 @@ internal sealed class LiveGapFillCoordinator(
         var results = await Task.WhenAll(downloads);
 
         var stats = gapStatsDic.GetOrAdd(task.Id, _ => new LiveGapStats());
+        var completedBatches = new List<LiveGapFillBatchCompletion>();
         lock (pending)
         {
             foreach (var (number, seg, result) in results)
@@ -265,9 +271,14 @@ internal sealed class LiveGapFillCoordinator(
                 if (seg != null && result is { Success: true })
                 {
                     var countedInPlaylist = pending.TryGetValue(number, out var entry) && entry.CountedInPlaylist;
+                    var batchIds = entry?.BatchIds.ToArray() ?? [];
                     fileDic[seg] = result;
                     pending.Remove(number);
                     stats.Filled++;
+                    foreach (var completion in MarkBatchesFilled(task.Id, batchIds))
+                    {
+                        completedBatches.Add(completion);
+                    }
                     if (!countedInPlaylist)
                     {
                         updateProgress(() => task.MaxValue += 1);
@@ -281,12 +292,15 @@ internal sealed class LiveGapFillCoordinator(
                     if (LiveSegmentGapPlanner.ShouldEvictByRetry(entry.Attempts, retryCount))
                     {
                         pending.Remove(number);
+                        MarkBatchesLost(task.Id, entry.BatchIds);
                         RecordLostGap(task.Id, number);
                         TryDeleteDownloadResult(result);
                     }
                 }
             }
         }
+
+        LogCompletedBatches(task.Id, streamSpec.ToShortShortString().EscapeMarkup(), completedBatches);
     }
 
     /// <summary>
@@ -327,12 +341,14 @@ internal sealed class LiveGapFillCoordinator(
             {
                 lock (pending)
                 {
+                    if (pending.TryGetValue(block, out var entry))
+                        MarkBatchesLost(taskId, entry.BatchIds);
                     pending.Remove(block);
                 }
             }
             RecordLostGap(taskId, block);
             mergeHoldDic.TryRemove(taskId, out _);
-            Logger.WarnMarkUp($"[darkorange3_1]Real-time merge skipped unfilled gap at segment {block} after grace period; marking it lost to avoid stalling live output.[/]");
+            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: real-time merge skipped unfilled gap at segment {block} after grace period; marking it lost to avoid stalling live output.[/]");
         }
     }
 
@@ -367,10 +383,10 @@ internal sealed class LiveGapFillCoordinator(
         if (stats.Filled == 0 && stats.Deferred == 0 && lostCount == 0)
             return;
 
-        Logger.InfoMarkUp($"[darkorange3_1]Live gap-fill summary for {streamLabel}: filled={stats.Filled}, deferred={stats.Deferred}, lost={lostCount} ({lostRanges}), still_pending={pendingCount} ({pendingRanges}).[/]");
+        Logger.InfoMarkUp($"[darkorange3_1]Live fill gap summary for {streamLabel}: filled={stats.Filled}, deferred={stats.Deferred}, lost={lostCount} ({lostRanges}), still_pending={pendingCount} ({pendingRanges}).[/]");
         if (lostCount > 0)
         {
-            Logger.WarnMarkUp($"[darkorange3_1]Live gap-fill: {lostCount} segment(s) ultimately lost for {streamLabel}: {lostRanges}.[/]");
+            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: {lostCount} segment(s) ultimately lost for {streamLabel}: {lostRanges}.[/]");
         }
     }
 
@@ -391,16 +407,23 @@ internal sealed class LiveGapFillCoordinator(
     /// </summary>
     private void EnqueuePendingGaps(int taskId, IEnumerable<long> numbers, long window, bool countedInPlaylist)
     {
+        var numberList = numbers.Distinct().Order().ToList();
+        if (numberList.Count == 0)
+            return;
+
         var pending = pendingGapNumbersDic.GetOrAdd(taskId, _ => new SortedDictionary<long, PendingGapEntry>());
         var lastMerged = lastMergedNumberDic.GetValueOrDefault(taskId);
         var stats = gapStatsDic.GetOrAdd(taskId, _ => new LiveGapStats());
+        var tracker = gapBatchTrackers.GetOrAdd(taskId, _ => new LiveGapFillBatchTracker());
 
         lock (pending)
         {
-            foreach (var n in numbers)
+            var batchId = tracker.AddBatch(numberList[0], numberList[^1], numberList.Count);
+            foreach (var n in numberList)
             {
                 if (n <= lastMerged)
                 {
+                    tracker.MarkLost(batchId);
                     RecordLostGap(taskId, n);
                     continue;
                 }
@@ -410,10 +433,11 @@ internal sealed class LiveGapFillCoordinator(
                     if (existing.Window < window)
                         existing.Window = window;
                     existing.CountedInPlaylist |= countedInPlaylist;
+                    existing.BatchIds.Add(batchId);
                     continue;
                 }
 
-                pending[n] = new PendingGapEntry { Attempts = 0, Window = window, CountedInPlaylist = countedInPlaylist };
+                pending[n] = new PendingGapEntry { Attempts = 0, Window = window, CountedInPlaylist = countedInPlaylist, BatchIds = { batchId } };
                 stats.Deferred++;
             }
         }
@@ -435,10 +459,60 @@ internal sealed class LiveGapFillCoordinator(
         if (omittedRange != null)
         {
             RecordLostGapRange(taskId, omittedRange.Value.Start, omittedRange.Value.End);
-            Logger.WarnMarkUp($"[darkorange3_1]Large predictable URL gap {range.Start} ~ {range.End} has {range.Count} missing segment(s); capped pending expansion to latest {expandRange.Count} segment(s) ({expandRange.Start} ~ {expandRange.End}) by EXT-X-TARGETDURATION={targetDurationSeconds.ToString("0.###", CultureInfo.InvariantCulture)}s.[/]");
+            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: large predictable URL gap {range.Start} ~ {range.End} has {range.Count} missing segment(s); capped pending expansion to latest {expandRange.Count} segment(s) ({expandRange.Start} ~ {expandRange.End}) by EXT-X-TARGETDURATION={targetDurationSeconds.ToString("0.###", CultureInfo.InvariantCulture)}s.[/]");
         }
 
         EnqueuePendingGaps(taskId, RangeInclusive(expandRange.Start, expandRange.End), window, countedInPlaylist);
+    }
+
+    private IEnumerable<LiveGapFillBatchCompletion> MarkBatchesFilled(int taskId, IEnumerable<long> batchIds)
+    {
+        if (!gapBatchTrackers.TryGetValue(taskId, out var tracker))
+            yield break;
+
+        foreach (var batchId in batchIds)
+        {
+            var completion = tracker.MarkFilled(batchId);
+            if (completion != null)
+                yield return completion.Value;
+        }
+    }
+
+    private void MarkBatchesLost(int taskId, IEnumerable<long> batchIds)
+    {
+        if (!gapBatchTrackers.TryGetValue(taskId, out var tracker))
+            return;
+
+        foreach (var batchId in batchIds)
+        {
+            tracker.MarkLost(batchId);
+        }
+    }
+
+    private void LogCompletedBatches(int taskId, string streamLabel, IReadOnlyList<LiveGapFillBatchCompletion> completedBatches)
+    {
+        if (completedBatches.Count == 0)
+            return;
+
+        var (pendingCount, pendingRanges) = GetPendingGapSnapshot(taskId);
+        foreach (var batch in completedBatches)
+        {
+            var range = FormatSegmentNumberRanges([new SegmentNumberRange(batch.Start, batch.End)]);
+            Logger.InfoMarkUp($"[darkorange3_1]Live fill gap batch summary for {streamLabel}: filled={batch.Count}, lost=0, range={range}, still_pending={pendingCount} ({pendingRanges}).[/]");
+        }
+    }
+
+    private (long Count, string Ranges) GetPendingGapSnapshot(int taskId)
+    {
+        if (!pendingGapNumbersDic.TryGetValue(taskId, out var pending))
+            return (0, "none");
+
+        lock (pending)
+        {
+            return pending.Count == 0
+                ? (0, "none")
+                : (pending.Count, FormatContiguousIndexRanges(pending.Keys.ToList()));
+        }
     }
 
     /// <summary>把单个号记为最终丢失（无法补齐），计入丢失统计。</summary>
@@ -574,5 +648,60 @@ internal sealed class LiveGapFillCoordinator(
 
         ranges.Add(new SegmentNumberRange(start, prev));
         return FormatSegmentNumberRanges(ranges);
+    }
+}
+
+internal readonly record struct LiveGapFillBatchCompletion(long Start, long End, long Count);
+
+internal sealed class LiveGapFillBatchTracker
+{
+    private long nextBatchId;
+    private readonly Dictionary<long, LiveGapFillBatch> batches = [];
+
+    public long AddBatch(long start, long end, long count)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
+
+        var id = ++nextBatchId;
+        batches[id] = new LiveGapFillBatch(start, end, count);
+        return id;
+    }
+
+    public LiveGapFillBatchCompletion? MarkFilled(long id)
+    {
+        return Mark(id, filled: true);
+    }
+
+    public void MarkLost(long id)
+    {
+        Mark(id, filled: false);
+    }
+
+    private LiveGapFillBatchCompletion? Mark(long id, bool filled)
+    {
+        if (!batches.TryGetValue(id, out var batch))
+            return null;
+
+        if (filled)
+            batch.Filled++;
+        else
+            batch.Lost++;
+
+        if (batch.Filled + batch.Lost < batch.Count)
+            return null;
+
+        batches.Remove(id);
+        return batch.Lost == 0 && batch.Filled == batch.Count
+            ? new LiveGapFillBatchCompletion(batch.Start, batch.End, batch.Count)
+            : null;
+    }
+
+    private sealed class LiveGapFillBatch(long start, long end, long count)
+    {
+        public readonly long Start = start;
+        public readonly long End = end;
+        public readonly long Count = count;
+        public long Filled;
+        public long Lost;
     }
 }
