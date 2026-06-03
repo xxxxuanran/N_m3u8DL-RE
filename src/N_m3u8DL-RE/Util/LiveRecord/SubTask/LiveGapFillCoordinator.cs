@@ -108,7 +108,11 @@ internal sealed class LiveGapFillCoordinator(
         if (!IsPredictableFillEnabled(taskId) || !TryGetSegmentUrlNumber(segment, out var number))
             return;
 
-        EnqueuePendingGaps(taskId, [number], LiveSegmentGapPlanner.ComputeGapWindow(1, GetGapWindowTargetDuration(streamSpec)), countedInPlaylist: true);
+        EnqueuePendingGaps(
+            taskId,
+            [number],
+            LiveSegmentGapPlanner.ComputeGapWindow(1, GetGapWindowTargetDuration(streamSpec), GetSanitizedDownloadRetryCount()),
+            countedInPlaylist: true);
     }
 
     /// <summary>
@@ -156,9 +160,15 @@ internal sealed class LiveGapFillCoordinator(
         }
 
         var gapWindowTd = GetGapWindowTargetDuration(streamSpec);
+        var gapWindowRetryCount = GetSanitizedDownloadRetryCount();
         foreach (var range in plan.GapRanges)
         {
-            EnqueuePendingGapRange(taskId, range, LiveSegmentGapPlanner.ComputeGapWindow(range.Count, gapWindowTd), countedInPlaylist: false, targetDurationSeconds: gapWindowTd);
+            EnqueuePendingGapRange(
+                taskId,
+                range,
+                LiveSegmentGapPlanner.ComputeGapWindow(range.Count, gapWindowTd, gapWindowRetryCount),
+                countedInPlaylist: false,
+                targetDurationSeconds: gapWindowTd);
             Logger.WarnMarkUp($"[darkorange3_1]Detected {range.Count} missing segment(s) in predictable URL pattern ({range.Start} ~ {range.End}); deferred to subTask fill queue.[/]");
         }
 
@@ -195,7 +205,7 @@ internal sealed class LiveGapFillCoordinator(
             return;
 
         var parallel = LiveSubTaskSegmentDownloader.ResolveParallelism(getThreadCount());
-        var retryCount = Math.Max(0, getDownloadRetryCount());
+        var retryCount = GetSanitizedDownloadRetryCount();
         var subTaskHostMirrors = LiveSubTaskSegmentDownloader.ResolveMirrorHosts(getLiveHostMirrors());
         var hwm = highestEnqueuedNumberDic.GetValueOrDefault(task.Id);
 
@@ -285,7 +295,7 @@ internal sealed class LiveGapFillCoordinator(
     /// </summary>
     public long ResolveMergeWritableBound(int taskId, ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic)
     {
-        var graceMs = Math.Max(1000d, getHttpRequestTimeout() * 1000d);
+        var graceMs = Math.Max(10 * 1000d, getHttpRequestTimeout() * 1000d);  // 保底 10 秒
         while (true)
         {
             var block = GetMergeBlockNumber(taskId);
@@ -473,6 +483,11 @@ internal sealed class LiveGapFillCoordinator(
     private static double GetGapWindowTargetDuration(StreamSpec streamSpec)
     {
         return streamSpec.Playlist?.TargetDuration is > 0 ? streamSpec.Playlist.TargetDuration!.Value : 1d;
+    }
+
+    private int GetSanitizedDownloadRetryCount()
+    {
+        return Math.Max(0, getDownloadRetryCount());
     }
 
     /// <summary>生成闭区间 [start, end] 的连续号序列。</summary>

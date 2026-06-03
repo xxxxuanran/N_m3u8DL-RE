@@ -117,19 +117,24 @@ public class LiveSegmentGapPlannerTests
     }
 
     [Theory]
-    // TD=1：下限=ceil(20/1)=20，上限=count*5，基准=count*3。
-    [InlineData(1, 1.0, 5)]      // 基准3 被下限抬到20，再被上限(5)压回 -> 5
-    [InlineData(4, 1.0, 20)]     // 基准12 抬到下限20，上限20 -> 20
-    [InlineData(10, 1.0, 30)]    // 基准30 在[20,50]内 -> 30
-    [InlineData(22, 1.0, 66)]    // 基准66 在[20,110]内 -> 66
-    [InlineData(23, 1.0, 69)]    // 本次事故缺口 -> 69（不变）
-    [InlineData(100, 1.0, 300)]  // 基准300 在[20,500]内 -> 300
-    // TD=4：下限=ceil(20/4)=5。
-    [InlineData(1, 4.0, 5)]      // 基准3 抬到下限5，上限5 -> 5
-    [InlineData(10, 4.0, 30)]    // 基准30 在[5,50]内 -> 30
-    public void ComputeGapWindow_ClampsBaseBetweenFloorAndCap(long count, double targetDuration, long expected)
+    // TD=1：下限=Max(30, ceil(30/1))=30，上限=Max(1800, ceil(1800/1))=1800。
+    [InlineData(1, 1.0, 3, 30)]       // 基准3 被下限抬到30
+    [InlineData(10, 1.0, 3, 30)]      // 基准30 在[30,1800]内
+    [InlineData(22, 1.0, 3, 66)]      // 基准66 在[30,1800]内
+    [InlineData(23, 1.0, 3, 69)]      // 本次事故缺口 -> 69（不变）
+    [InlineData(100, 1.0, 3, 300)]    // 基准300 在[30,1800]内
+    [InlineData(1000, 1.0, 3, 1800)]  // 基准3000 被上限压到1800
+    [InlineData(10, 1.0, 5, 50)]      // 基准随 --download-retry-count 变化
+    [InlineData(10, 1.0, 0, 30)]      // retry=0 时仍保留下限窗口
+    // TD=4：下限=Max(30, ceil(30/4))=30，上限=1800。
+    [InlineData(1, 4.0, 3, 30)]
+    [InlineData(10, 4.0, 3, 30)]
+    // TD=0.5：下限=60，上限=3600。
+    [InlineData(10, 0.5, 3, 60)]
+    [InlineData(2000, 0.5, 3, 3600)]
+    public void ComputeGapWindow_ClampsRetryScaledBaseBetweenFloorAndCap(long count, double targetDuration, int retryCount, long expected)
     {
-        LiveSegmentGapPlanner.ComputeGapWindow(count, targetDuration).ShouldBe(expected);
+        LiveSegmentGapPlanner.ComputeGapWindow(count, targetDuration, retryCount).ShouldBe(expected);
     }
 
     [Theory]
