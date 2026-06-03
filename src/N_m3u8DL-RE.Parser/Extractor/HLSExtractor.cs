@@ -21,6 +21,12 @@ internal class HLSExtractor : IExtractor
 
     public ParserConfig ParserConfig { get; set; }
 
+    private sealed record HlsPlaylistRefreshResult(
+        StreamSpec StreamSpec,
+        Playlist NewPlaylist,
+        string? Extension,
+        string? RefreshedUrl);
+
     public HLSExtractor(ParserConfig parserConfig)
     {
         this.ParserConfig = parserConfig;
@@ -501,24 +507,24 @@ internal class HLSExtractor : IExtractor
         ];
     }
 
-    private async Task LoadM3u8FromUrlAsync(string url)
+    private async Task LoadM3u8FromUrlAsync(string url, CancellationToken cancellationToken = default)
     {
         // Logger.Info(ResString.loadingUrl + url);
         if (url.StartsWith("file:"))
         {
             var uri = new Uri(url);
-            this.M3u8Content = File.ReadAllText(uri.LocalPath);
+            this.M3u8Content = await File.ReadAllTextAsync(uri.LocalPath, cancellationToken);
         }
         else if (url.StartsWith("http"))
         {
             try
             {
-                (this.M3u8Content, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(url, ParserConfig.Headers);
+                (this.M3u8Content, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(url, ParserConfig.Headers, cancellationToken);
             }
             catch (HttpRequestException) when (ParserConfig.OriginalUrl.StartsWith("http") && url != ParserConfig.OriginalUrl)
             {
                 // 当URL无法访问时，再请求原始URL
-                (this.M3u8Content, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(ParserConfig.OriginalUrl, ParserConfig.Headers);
+                (this.M3u8Content, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(ParserConfig.OriginalUrl, ParserConfig.Headers, cancellationToken);
             }
         }
 
@@ -534,20 +540,63 @@ internal class HLSExtractor : IExtractor
     /// </summary>
     /// <param name="lists"></param>
     /// <returns></returns>
-    private async Task RefreshUrlFromMaster(List<StreamSpec> lists)
+    private async Task<Dictionary<StreamSpec, string>> ResolveUrlsFromMasterAsync(List<StreamSpec> lists, CancellationToken cancellationToken = default)
     {
         // 重新加载master m3u8, 刷新选中流的URL
-        await LoadM3u8FromUrlAsync(ParserConfig.Url);
+        await LoadM3u8FromUrlAsync(ParserConfig.Url, cancellationToken);
         var newStreams = await ParseMasterListAsync();
         newStreams = newStreams.DistinctBy(p => p.Url).ToList();
+        var refreshedUrls = new Dictionary<StreamSpec, string>();
         foreach (var l in lists)
         {
             var match = newStreams.Where(n => n.ToShortString() == l.ToShortString()).ToList();
             if (match.Count == 0) continue;
+            if (match.First().Url == null) continue;
 
-            Logger.DebugMarkUp($"{l.Url} => {match.First().Url}");
-            l.Url = match.First().Url;
+            refreshedUrls[l] = match.First().Url!;
         }
+
+        return refreshedUrls;
+    }
+
+    private async Task RefreshUrlFromMaster(List<StreamSpec> lists, CancellationToken cancellationToken = default)
+    {
+        var refreshedUrls = await ResolveUrlsFromMasterAsync(lists, cancellationToken);
+        foreach (var (streamSpec, url) in refreshedUrls)
+        {
+            Logger.DebugMarkUp($"{streamSpec.Url} => {url}");
+            streamSpec.Url = url;
+        }
+    }
+
+    private static void ApplyPlaylistToStreamSpec(StreamSpec streamSpec, Playlist newPlaylist)
+    {
+        if (streamSpec.Playlist?.MediaInit != null)
+        {
+            var mediaInitChanged = IsMediaInitChanged(streamSpec.Playlist!.MediaInit!, newPlaylist.MediaInit);
+            streamSpec.Playlist!.MediaInitChanged = mediaInitChanged;
+            streamSpec.Playlist!.PendingMediaInit = mediaInitChanged ? newPlaylist.MediaInit : null;
+            streamSpec.Playlist!.MediaParts = newPlaylist.MediaParts; // 不更新init
+        }
+        else
+        {
+            streamSpec.Playlist = newPlaylist;
+        }
+    }
+
+    private static string? ResolveExtension(StreamSpec streamSpec, Playlist playlist)
+    {
+        if (streamSpec.MediaType == MediaType.SUBTITLES)
+        {
+            var extension = streamSpec.Extension;
+            var hasTtml = playlist.MediaParts.Any(p => p.MediaSegments.Any(m => m.Url.Contains(".ttml")));
+            var hasVtt = playlist.MediaParts.Any(p => p.MediaSegments.Any(m => m.Url.Contains(".vtt") || m.Url.Contains(".webvtt")));
+            if (hasTtml) extension = "ttml";
+            if (hasVtt) extension = "vtt";
+            return extension;
+        }
+
+        return streamSpec.Playlist?.MediaInit != null || playlist.MediaInit != null ? "m4s" : "ts";
     }
 
     public async Task FetchPlayListAsync(List<StreamSpec> lists)
@@ -568,34 +617,54 @@ internal class HLSExtractor : IExtractor
             }
 
             var newPlaylist = await ParseListAsync();
-            if (lists[i].Playlist?.MediaInit != null)
-            {
-                var mediaInitChanged = IsMediaInitChanged(lists[i].Playlist!.MediaInit!, newPlaylist.MediaInit);
-                lists[i].Playlist!.MediaInitChanged = mediaInitChanged;
-                lists[i].Playlist!.PendingMediaInit = mediaInitChanged ? newPlaylist.MediaInit : null;
-                lists[i].Playlist!.MediaParts = newPlaylist.MediaParts; // 不更新init
-            }
-            else
-            {
-                lists[i].Playlist = newPlaylist;
-            }
-
-            if (lists[i].MediaType == MediaType.SUBTITLES)
-            {
-                var a = lists[i].Playlist!.MediaParts.Any(p => p.MediaSegments.Any(m => m.Url.Contains(".ttml")));
-                var b = lists[i].Playlist!.MediaParts.Any(p => p.MediaSegments.Any(m => m.Url.Contains(".vtt") || m.Url.Contains(".webvtt")));
-                if (a) lists[i].Extension = "ttml";
-                if (b) lists[i].Extension = "vtt";
-            }
-            else
-            {
-                lists[i].Extension = lists[i].Playlist!.MediaInit != null ? "m4s" : "ts";
-            }
+            ApplyPlaylistToStreamSpec(lists[i], newPlaylist);
+            lists[i].Extension = ResolveExtension(lists[i], lists[i].Playlist!);
         }
     }
 
-    public async Task RefreshPlayListAsync(List<StreamSpec> streamSpecs)
+    public async Task RefreshPlayListAsync(List<StreamSpec> streamSpecs, CancellationToken cancellationToken = default)
     {
-        await FetchPlayListAsync(streamSpecs);
+        var stagedResults = new List<HlsPlaylistRefreshResult>(streamSpecs.Count);
+        var stagedUrls = new Dictionary<StreamSpec, string>();
+
+        foreach (var streamSpec in streamSpecs)
+        {
+            var url = stagedUrls.GetValueOrDefault(streamSpec, streamSpec.Url);
+            try
+            {
+                await LoadM3u8FromUrlAsync(url!, cancellationToken);
+            }
+            catch (HttpRequestException) when (MasterM3u8Flag)
+            {
+                Logger.WarnMarkUp("Can not load m3u8. Try refreshing url from master url...");
+                var refreshedUrls = await ResolveUrlsFromMasterAsync(streamSpecs, cancellationToken);
+                foreach (var (spec, refreshedUrl) in refreshedUrls)
+                {
+                    stagedUrls[spec] = refreshedUrl;
+                }
+
+                url = stagedUrls.GetValueOrDefault(streamSpec, streamSpec.Url);
+                await LoadM3u8FromUrlAsync(url!, cancellationToken);
+            }
+
+            var newPlaylist = await ParseListAsync();
+            stagedResults.Add(new HlsPlaylistRefreshResult(
+                streamSpec,
+                newPlaylist,
+                ResolveExtension(streamSpec, newPlaylist),
+                stagedUrls.GetValueOrDefault(streamSpec)));
+        }
+
+        foreach (var result in stagedResults)
+        {
+            if (result.RefreshedUrl != null)
+            {
+                Logger.DebugMarkUp($"{result.StreamSpec.Url} => {result.RefreshedUrl}");
+                result.StreamSpec.Url = result.RefreshedUrl;
+            }
+
+            ApplyPlaylistToStreamSpec(result.StreamSpec, result.NewPlaylist);
+            result.StreamSpec.Extension = result.Extension;
+        }
     }
 }

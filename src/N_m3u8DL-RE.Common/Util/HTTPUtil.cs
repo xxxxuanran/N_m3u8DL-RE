@@ -82,7 +82,7 @@ public static class HTTPUtil
         throw last ?? new InvalidOperationException("Connect failed");
     }
 
-    private static async Task<HttpResponseMessage> DoGetAsync(string url, Dictionary<string, string>? headers = null)
+    private static async Task<HttpResponseMessage> DoGetAsync(string url, Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
     {
         Logger.Debug(ResString.fetch + url);
         using var webRequest = new HttpRequestMessage(HttpMethod.Get, url);
@@ -99,7 +99,7 @@ public static class HTTPUtil
 
         Logger.Debug(webRequest.Headers.ToString());
         // 手动处理跳转，以免自定义Headers丢失
-        var webResponse = await AppHttpClient.SendAsync(webRequest, HttpCompletionOption.ResponseHeadersRead);
+        var webResponse = await AppHttpClient.SendAsync(webRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (((int)webResponse.StatusCode).ToString().StartsWith("30"))
         {
             HttpResponseHeaders respHeaders = webResponse.Headers;
@@ -121,7 +121,7 @@ public static class HTTPUtil
                 if (redirectedUrl != url)
                 {
                     Logger.Extra($"Redirected => {redirectedUrl}");
-                    return await DoGetAsync(redirectedUrl, headers);
+                    return await DoGetAsync(redirectedUrl, headers, cancellationToken);
                 }
             }
         }
@@ -132,15 +132,15 @@ public static class HTTPUtil
         return webResponse;
     }
 
-    public static async Task<byte[]> GetBytesAsync(string url, Dictionary<string, string>? headers = null)
+    public static async Task<byte[]> GetBytesAsync(string url, Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
     {
         if (url.StartsWith("file:"))
         {
-            return await File.ReadAllBytesAsync(new Uri(url).LocalPath);
+            return await File.ReadAllBytesAsync(new Uri(url).LocalPath, cancellationToken);
         }
 
-        var webResponse = await DoGetAsync(url, headers);
-        var bytes = await webResponse.Content.ReadAsByteArrayAsync();
+        var webResponse = await DoGetAsync(url, headers, cancellationToken);
+        var bytes = await webResponse.Content.ReadAsByteArrayAsync(cancellationToken);
         Logger.Debug(HexUtil.BytesToHex(bytes, " "));
         return bytes;
     }
@@ -151,10 +151,10 @@ public static class HTTPUtil
     /// <param name="url"></param>
     /// <param name="headers"></param>
     /// <returns></returns>
-    public static async Task<string> GetWebSourceAsync(string url, Dictionary<string, string>? headers = null)
+    public static async Task<string> GetWebSourceAsync(string url, Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
     {
-        var webResponse = await DoGetAsync(url, headers);
-        string htmlCode = await webResponse.Content.ReadAsStringAsync();
+        var webResponse = await DoGetAsync(url, headers, cancellationToken);
+        string htmlCode = await webResponse.Content.ReadAsStringAsync(cancellationToken);
         Logger.Debug(htmlCode);
         return htmlCode;
     }
@@ -165,9 +165,9 @@ public static class HTTPUtil
     /// <param name="url"></param>
     /// <param name="headers"></param>
     /// <returns>(Source Code, RedirectedUrl)</returns>
-    public static async Task<(string, string)> GetWebSourceAndNewUrlAsync(string url, Dictionary<string, string>? headers = null)
+    public static async Task<(string, string)> GetWebSourceAndNewUrlAsync(string url, Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
     {
-        var webResponse = await DoGetAsync(url, headers);
+        var webResponse = await DoGetAsync(url, headers, cancellationToken);
         var htmlCode = "";
 
         // 如果响应是压缩的（gzip/deflate/br），直接按文本处理
@@ -175,16 +175,16 @@ public static class HTTPUtil
         if (encodings.Count != 0)
         {
             Logger.Debug($"Detected compression: {string.Join(",", encodings)}");
-            htmlCode = await webResponse.Content.ReadAsStringAsync();
+            htmlCode = await webResponse.Content.ReadAsStringAsync(cancellationToken);
             return (htmlCode, webResponse.RequestMessage?.RequestUri?.AbsoluteUri ?? url);
         }
 
         // 打开流，读取少量样本检测类型
         const int sampleSize = 4096;
-        await using var responseStream = await webResponse.Content.ReadAsStreamAsync();
+        await using var responseStream = await webResponse.Content.ReadAsStreamAsync(cancellationToken);
 
         var buffer = new byte[sampleSize];
-        var bytesRead = await responseStream.ReadAsync(buffer.AsMemory(0, sampleSize));
+        var bytesRead = await responseStream.ReadAsync(buffer.AsMemory(0, sampleSize), cancellationToken);
 
         // MPEG-TS 检测
         if (BinaryContentCheckUtil.IsMpeg2TsBuffer(buffer.AsSpan(0, bytesRead)))
@@ -203,7 +203,7 @@ public static class HTTPUtil
         // 否则是文本，完整读取
         using var ms = new MemoryStream();
         ms.Write(buffer, 0, bytesRead);
-        await responseStream.CopyToAsync(ms);
+        await responseStream.CopyToAsync(ms, cancellationToken);
 
         var allBytes = ms.ToArray();
         var encoding = GetEncodingFromResponse(webResponse) ?? Encoding.UTF8;

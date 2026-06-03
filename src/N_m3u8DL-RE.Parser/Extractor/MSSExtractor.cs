@@ -351,19 +351,19 @@ internal partial class MSSExtractor : IExtractor
         }
     }
 
-    public async Task RefreshPlayListAsync(List<StreamSpec> streamSpecs)
+    public async Task RefreshPlayListAsync(List<StreamSpec> streamSpecs, CancellationToken cancellationToken = default)
     {
         if (streamSpecs.Count == 0) return;
 
         var (rawText, url) = ("", ParserConfig.Url);
         try
         {
-            (rawText, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(ParserConfig.Url, ParserConfig.Headers);
+            (rawText, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(ParserConfig.Url, ParserConfig.Headers, cancellationToken);
         }
         catch (HttpRequestException) when (ParserConfig.Url != ParserConfig.OriginalUrl)
         {
             // 当URL无法访问时，再请求原始URL
-            (rawText, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(ParserConfig.OriginalUrl, ParserConfig.Headers);
+            (rawText, url) = await HTTPUtil.GetWebSourceAndNewUrlAsync(ParserConfig.OriginalUrl, ParserConfig.Headers, cancellationToken);
         }
 
         ParserConfig.Url = url;

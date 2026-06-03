@@ -262,12 +262,6 @@ internal static class StaticText
             zhTW: "錄製直播刷新播放列表出現間隙時，按可預測的連續數字命名規律自動補齊缺失的分片",
             enUS: "Auto-fill missing segments by predictable numeric naming pattern when the live playlist refreshes with gaps"
         ),
-        ["cmd_liveFillSegmentsGapMax"] = new TextContainer
-        (
-            zhCN: "录制直播自动补齐缺失分片时允许补齐的最大数量；未指定时默认为 max(1, min(60, ceil(60/wait_time)))，wait_time 为刷新间隔秒数（可由 --live-wait-time 指定）",
-            zhTW: "錄製直播自動補齊缺失分片時允許補齊的最大數量；未指定時預設為 max(1, min(60, ceil(60/wait_time)))，wait_time 為刷新間隔秒數（可由 --live-wait-time 指定）",
-            enUS: "Max missing segments to fill per gap; default max(1, min(60, ceil(60/wait_time))), where wait_time is the refresh interval in seconds (overridable via --live-wait-time)"
-        ),
         ["cmd_liveRestartOnExtMapChange"] = new TextContainer
         (
             zhCN: "录制直播时若检测到EXT-X-MAP变动，自动收尾当前输出并以新的初始化分片重启录制；关闭时将直接停止录制",

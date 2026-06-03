@@ -44,6 +44,17 @@ internal class SimpleLiveRecordManager2
     ConcurrentDictionary<int, string> LastFileNameDic = new(); // 上次下载的文件名
     ConcurrentDictionary<int, long> MaxIndexDic = new(); // 最大Index
     ConcurrentDictionary<int, long> DateTimeDic = new(); // 上次下载的dateTime
+    // P0-1：已入队（发往消费者）的最大 URL 数字号。单调递增，仅以 URL 数字推导（不受 offset 污染），
+    // 作为缺口检测与滑窗驱逐的唯一锚点，取代脆弱的 LastFileName/MaxIndex 配对。
+    ConcurrentDictionary<int, long> HighestEnqueuedNumberDic = new();
+    // P0-3：待补缺口队列。号 -> {已尝试次数, 滑窗大小}。SortedDictionary 非线程安全，访问需 lock 其自身实例。
+    ConcurrentDictionary<int, SortedDictionary<long, PendingGapEntry>> PendingGapNumbersDic = new();
+    // P2-1：已写出（合并）到输出的最高连续 URL 号，用于合并空洞感知。
+    ConcurrentDictionary<int, long> LastMergedNumberDic = new();
+    // P2-1：合并因等待某缺口而暂缓的起始时刻，用于宽限超时判定。
+    ConcurrentDictionary<int, (long BlockNumber, DateTime Since)> MergeHoldDic = new();
+    // P2-2：实时补洞统计（成功补齐数 / 放弃丢失号集合），用于收尾汇总。
+    ConcurrentDictionary<int, LiveGapStats> GapStatsDic = new();
     CancellationTokenSource CancellationTokenSource = new(); // 取消Wait
 
     private readonly Lock lockObj = new();
@@ -61,16 +72,33 @@ internal class SimpleLiveRecordManager2
         CurrentPlaylist,
     }
 
-    private enum LiveFromStartBackfillMode
+    private readonly record struct MissingSegmentRange(long Start, long End, SegmentGapSource Source);
+
+    private readonly record struct SegmentNumberRange(long Start, long End)
     {
-        MirrorFirst,
-        PinnedFirst,
+        public long Count => End - Start + 1;
     }
 
-    private readonly record struct MissingSegmentRange(long Start, long End, SegmentGapSource Source);
-    // Live from start 回溯下载的不变上下文（模板分片、命名规律、临时目录、并发等），
-    // 在定界探测与升序回填之间共享，避免重复传一长串参数。
-    private sealed record LiveFromStartContext(
+    // P0-3：待补缺口条目。Attempts 为已重试次数（超 --download-retry-count 放弃），
+    // Window 为该号的滑动窗口（= 缺口缺片数 × 3，HighestEnqueuedNumber - 号 > Window 即驱逐）。
+    private sealed class PendingGapEntry
+    {
+        public int Attempts;
+        public long Window;
+        public bool CountedInPlaylist;
+    }
+
+    // P2-2：每流补洞统计。Filled 为最终补齐成功数；Lost 为放弃（滑窗/重试/合并越洞）丢失号集合。
+    private sealed class LiveGapStats
+    {
+        public long Filled;
+        public long Deferred;
+        public readonly SortedSet<long> Lost = [];
+        public readonly List<SegmentNumberRange> CompactLostRanges = [];
+    }
+    // subTask（live-from-start 回溯下载 / 待补缺口填充）共享的不变上下文（模板分片、命名规律、临时目录、镜像等），
+    // 在定界探测、升序回填与缺口补齐之间共享，避免重复传一长串参数。
+    private sealed record SubTaskDownloadContext(
         MediaSegment Template,
         SegmentUrlParts TemplateUrlParts,
         long TemplateNumber,
@@ -81,18 +109,14 @@ internal class SimpleLiveRecordManager2
         string Extension,
         SpeedContainer SpeedContainer,
         Dictionary<string, string> Headers,
-        int ProbeRetryCount,
-        // Live-from-start 镜像竞速统一使用 HostMirror 前半部分；空数组表示仅原始 URL。
+        // 每次分片下载（探测/正向并发填充）的重试次数：
+        //  - live-from-start（补充历史分片，可放弃）：有镜像=0，无镜像=1；
+        //  - live fill gap（录制后缺片，极大概率仍在服务端）：始终 = --download-retry-count。
+        int RetryCount,
+        // subTask 镜像竞速统一使用 HostMirror 前半部分；空数组表示仅原始 URL。
         string[] HostMirrors);
 
     private readonly record struct LiveFromStartDescendingResolved(MediaSegment? Segment, DownloadResult? Result, bool Reused);
-
-    private readonly record struct LiveFromStartBackfillResolved(
-        MediaSegment? Segment,
-        DownloadResult? Result,
-        bool Recovered,
-        LiveFromStartBackfillMode Mode,
-        bool CountForStats);
 
     private sealed record LiveFromStartDescendingScanResult(
         Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>> InFlight,
@@ -379,13 +403,22 @@ internal class SimpleLiveRecordManager2
         double segmentsDuration,
         WebVttSub currentVtt,
         bool firstSub,
-        long baseTimestamp)
+        long baseTimestamp,
+        long maxWritableNumberExclusive = long.MaxValue)
     {
+        List<MediaSegment> writableSubtitleKeys = streamSpec.MediaType == Common.Enum.MediaType.SUBTITLES
+            ? fileDic
+                .Where(f => f.Key != streamSpec.Playlist?.MediaInit && f.Value is { Success: true } && f.Key.Index < maxWritableNumberExclusive)
+                .Select(f => f.Key)
+                .OrderBy(k => k.Index)
+                .ToList()
+            : [];
+
         // 自动修复VTT raw字幕
         if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("vtt"))
         {
             // 排序字幕并修正时间戳
-            var keys = fileDic.Keys.OrderBy(k => k.Index).ToList();
+            var keys = writableSubtitleKeys;
             foreach (var seg in keys)
             {
                 var vttContent = await File.ReadAllTextAsync(fileDic[seg]!.ActualFilePath);
@@ -415,13 +448,16 @@ internal class SimpleLiveRecordManager2
             var (sawVtt, timescale) = MP4VttUtil.CheckInit(iniFileBytes);
             if (sawVtt)
             {
-                var mp4s = fileDic.OrderBy(s => s.Key.Index).Select(s => s.Value).Select(v => v!.ActualFilePath).Where(p => p.EndsWith(".m4s")).ToArray();
-                if (firstSub)
+                var mp4s = writableSubtitleKeys
+                    .Select(s => fileDic[s]!.ActualFilePath)
+                    .Where(p => p.EndsWith(".m4s"))
+                    .ToArray();
+                if (mp4s.Length > 0 && firstSub)
                 {
                     currentVtt = MP4VttUtil.ExtractSub(mp4s, timescale);
                     firstSub = false;
                 }
-                else
+                else if (mp4s.Length > 0)
                 {
                     var vtt = MP4VttUtil.ExtractSub(mp4s, timescale);
                     currentVtt.AddCuesFromOne(vtt);
@@ -432,7 +468,7 @@ internal class SimpleLiveRecordManager2
         // 自动修复TTML raw字幕
         if (DownloaderConfig.MyOptions.AutoSubtitleFix && streamSpec is { MediaType: Common.Enum.MediaType.SUBTITLES, Extension: not null } && streamSpec.Extension.Contains("ttml"))
         {
-            var keys = fileDic.OrderBy(s => s.Key.Index).Where(v => v.Value!.ActualFilePath.EndsWith(".m4s")).Select(s => s.Key).ToList();
+            var keys = writableSubtitleKeys.Where(s => fileDic[s]!.ActualFilePath.EndsWith(".m4s")).ToList();
             if (firstSub)
             {
                 if (baseTimestamp != 0)
@@ -477,7 +513,7 @@ internal class SimpleLiveRecordManager2
             // var initFile = fileDic.Values.Where(v => Path.GetFileName(v!.ActualFilePath).StartsWith("_init")).FirstOrDefault();
             // var iniFileBytes = File.ReadAllBytes(initFile!.ActualFilePath);
             // var sawTtml = MP4TtmlUtil.CheckInit(iniFileBytes);
-            var keys = fileDic.OrderBy(s => s.Key.Index).Where(v => v.Value!.ActualFilePath.EndsWith(".m4s")).Select(s => s.Key);
+            var keys = writableSubtitleKeys.Where(s => fileDic[s]!.ActualFilePath.EndsWith(".m4s")).ToList();
             if (firstSub)
             {
                 if (baseTimestamp != 0)
@@ -529,7 +565,8 @@ internal class SimpleLiveRecordManager2
         DecryptEngine decryptEngine,
         Stream? fileOutputStream,
         bool initWritten,
-        WebVttSub currentVtt)
+        WebVttSub currentVtt,
+        long maxWritableNumberExclusive = long.MaxValue)
     {
         // 合并
         var outputExt = "." + streamSpec.Extension;
@@ -603,7 +640,13 @@ internal class SimpleLiveRecordManager2
         if (streamSpec.MediaType != MediaType.SUBTITLES)
         {
             var initResult = streamSpec.Playlist!.MediaInit != null ? fileDic[streamSpec.Playlist!.MediaInit!]! : null;
-            var files = fileDic.Where(f => f.Key != streamSpec.Playlist!.MediaInit).OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
+            // P2-1：仅写出"合并前沿之前"（Index < maxWritableNumberExclusive）的分片，
+            // 空洞之后的分片暂缓保留在 fileDic，等待补片或宽限超时后再写，避免静默断裂与乱序。
+            var writableEntries = fileDic
+                .Where(f => f.Key != streamSpec.Playlist!.MediaInit && f.Value is { Success: true } && f.Key.Index < maxWritableNumberExclusive)
+                .OrderBy(s => s.Key.Index)
+                .ToList();
+            var files = writableEntries.Select(f => f.Value!.ActualFilePath).ToArray();
             // fmp4 的 init(ftyp+moov) 只需在输出流开头写入一次。
             // 直播每轮刷新都会进入本方法，若每轮都前置 init，会在单个输出文件里
             // 嵌入大量重复的 moov，导致 ffmpeg 报 "Found duplicated MOOV Atom" 且播放器索引缓慢。
@@ -630,7 +673,26 @@ internal class SimpleLiveRecordManager2
                     File.Delete(inputFilePath);
                 }
             }
-            fileDic.Clear();
+            // 更新已写出连续号（P2-1）。
+            if (writableEntries.Count > 0)
+            {
+                var maxWritten = long.MinValue;
+                foreach (var kv in writableEntries)
+                {
+                    if (TryGetSegmentUrlNumber(kv.Key, out var wn) && wn > maxWritten)
+                        maxWritten = wn;
+                    else if (kv.Key.Index > maxWritten)
+                        maxWritten = kv.Key.Index;
+                }
+                if (maxWritten != long.MinValue)
+                    LastMergedNumberDic[task.Id] = Math.Max(LastMergedNumberDic.GetValueOrDefault(task.Id), maxWritten);
+            }
+            // 移除"写出前沿之前"的全部非 init 分片（含写出成功的与极少数失败残留），
+            // 保留暂缓（Index >= maxWritableNumberExclusive，即空洞之后）的分片到下一轮，等待补片或宽限超时。
+            foreach (var key in fileDic.Keys.Where(k => k != streamSpec.Playlist!.MediaInit && k.Index < maxWritableNumberExclusive).ToList())
+            {
+                fileDic.TryRemove(key, out _);
+            }
             if (initResult != null)
             {
                 fileDic[streamSpec.Playlist!.MediaInit!] = initResult;
@@ -639,7 +701,11 @@ internal class SimpleLiveRecordManager2
         else
         {
             var initResult = streamSpec.Playlist!.MediaInit != null ? fileDic[streamSpec.Playlist!.MediaInit!]! : null;
-            var files = fileDic.OrderBy(s => s.Key.Index).Select(f => f.Value).Select(v => v!.ActualFilePath).ToArray();
+            var writableEntries = fileDic
+                .Where(f => f.Key != streamSpec.Playlist!.MediaInit && f.Value is { Success: true } && f.Key.Index < maxWritableNumberExclusive)
+                .OrderBy(s => s.Key.Index)
+                .ToList();
+            var files = writableEntries.Select(f => f.Value!.ActualFilePath).ToArray();
             foreach (var inputFilePath in files)
             {
                 if (!DownloaderConfig.MyOptions.LiveKeepSegments && !Path.GetFileName(inputFilePath).StartsWith("_init"))
@@ -659,7 +725,23 @@ internal class SimpleLiveRecordManager2
             var subBytes = Encoding.UTF8.GetBytes(subText);
             fileOutputStream.Position = 0;
             fileOutputStream.Write(subBytes);
-            fileDic.Clear();
+            if (writableEntries.Count > 0)
+            {
+                var maxWritten = long.MinValue;
+                foreach (var kv in writableEntries)
+                {
+                    if (TryGetSegmentUrlNumber(kv.Key, out var wn) && wn > maxWritten)
+                        maxWritten = wn;
+                    else if (kv.Key.Index > maxWritten)
+                        maxWritten = kv.Key.Index;
+                }
+                if (maxWritten != long.MinValue)
+                    LastMergedNumberDic[task.Id] = Math.Max(LastMergedNumberDic.GetValueOrDefault(task.Id), maxWritten);
+            }
+            foreach (var key in fileDic.Keys.Where(k => k != streamSpec.Playlist!.MediaInit && k.Index < maxWritableNumberExclusive).ToList())
+            {
+                fileDic.TryRemove(key, out _);
+            }
             if (initResult != null)
             {
                 fileDic[streamSpec.Playlist!.MediaInit!] = initResult;
@@ -702,6 +784,10 @@ internal class SimpleLiveRecordManager2
             : $"{DownloaderConfig.FileName}.{streamSpec.Language}".TrimEnd('.');
         var headers = DownloaderConfig.Headers;
         var decryptEngine = DownloaderConfig.MyOptions.DecryptionEngine;
+
+        // P0-3/P1-1：待补缺口填充用的镜像子集（与 live-from-start 统一为 subTask 前半镜像），以及合成模板。
+        var fillHostMirrors = GetSubTaskMirrorHosts();
+        MediaSegment? fillTemplate = null;
 
         Logger.Debug($"dirName: {dirName}; tmpDir: {tmpDir}; saveDir: {saveDir}; saveName: {saveName}");
 
@@ -851,6 +937,26 @@ internal class SimpleLiveRecordManager2
             foreach (var badKey in badDownloadedKeys)
             {
                 FileDic.Remove(badKey, out _);
+                // P1-2：真实分片下载失败 -> 记入待补队列做有界重试，而非永久丢弃。
+                if (IsPredictableFillEnabled(task) && TryGetSegmentUrlNumber(badKey, out var badNumber))
+                {
+                    EnqueuePendingGaps(task.Id, [badNumber], LiveSegmentGapPlanner.ComputeGapWindow(1, GetGapWindowTargetDuration(streamSpec)), countedInPlaylist: true);
+                }
+            }
+
+            // P0-3：捕获一个可解析编号的真实分片作为补片合成模板（持久化跨轮）。
+            foreach (var seg in segments)
+            {
+                if (TryGetSegmentUrlNumber(seg, out _))
+                {
+                    fillTemplate = seg;
+                }
+            }
+
+            // P0-3/P1-1：受控并发补发待补缺口（成功并入 FileDic 参与按序合并）。
+            if (fillTemplate != null)
+            {
+                await DrainPendingGapsAsync(streamSpec, task, speedContainer, tmpDir, headers, fillHostMirrors, FileDic, fillTemplate, SamePathDic[task.Id]);
             }
 
             if (!DownloaderConfig.MyOptions.LiveRealTimeMerge && segments.Count == 0)
@@ -873,8 +979,16 @@ internal class SimpleLiveRecordManager2
 
             await DecryptPendingMp4SegmentsAsync(pendingSegments, FileDic, Mp4DecryptedSegments, currentKID, mp4InitFile, decryptEngine, decryptionBinaryPath);
 
+            // P2：实时合并时，音视频与字幕共用同一空洞边界；空洞之后的成功分片继续留在 FileDic。
+            var mergeWritableBound = DownloaderConfig.MyOptions.LiveRealTimeMerge
+                ? (STOP_FLAG ? long.MaxValue : ResolveMergeWritableBound(task.Id, FileDic))
+                : long.MaxValue;
+            var writablePendingSegments = DownloaderConfig.MyOptions.LiveRealTimeMerge
+                ? pendingSegments.Where(s => s.Index < mergeWritableBound).ToList()
+                : pendingSegments;
+
             var segmentsDuration = DownloaderConfig.MyOptions.LiveRealTimeMerge
-                ? pendingSegments.Sum(s => s.Duration)
+                ? writablePendingSegments.Sum(s => s.Duration)
                 : segments.Sum(s => s.Duration);
 
             (currentVtt, firstSub, baseTimestamp) = await UpdateSubtitlesAsync(
@@ -884,7 +998,8 @@ internal class SimpleLiveRecordManager2
                 segmentsDuration,
                 currentVtt,
                 firstSub,
-                baseTimestamp);
+                baseTimestamp,
+                mergeWritableBound);
 
             RecordedDurDic[task.Id] += segmentsDuration;
 
@@ -911,7 +1026,8 @@ internal class SimpleLiveRecordManager2
                     decryptEngine,
                     fileOutputStream,
                     initWritten,
-                    currentVtt);
+                    currentVtt,
+                    mergeWritableBound);
             }
 
             if (STOP_FLAG && source.Count == 0)
@@ -919,6 +1035,9 @@ internal class SimpleLiveRecordManager2
         }
 
         await liveFromStartDownloadTask;
+
+        // P2-2：实时录制补洞收尾汇总（filled/deferred/lost 区间），让缺片可见可追溯。
+        LogLiveGapSummary(task.Id, streamSpec.ToShortShortString().EscapeMarkup());
 
         if (fileOutputStream == null) return true;
 
@@ -991,6 +1110,9 @@ internal class SimpleLiveRecordManager2
                     task.MaxValue += newList.Count;
                     // 推送给消费者
                     await BlockDic[task.Id].SendAsync(newList);
+                    MaxIndexDic[task.Id] = Math.Max(MaxIndexDic[task.Id], newList.Max(s => s.Index));
+                    // P0-1：以 URL 数字推导并单调更新高水位号（缺口检测/滑窗驱逐的锚点）。
+                    UpdateHighestEnqueuedNumber(task.Id, newList);
                     // 更新最新链接
                     LastFileNameDic[task.Id] = GetSegmentName(newList.Last(), allHasDatetime, SamePathDic[task.Id]);
                     // 尝试更新时间戳
@@ -1040,9 +1162,27 @@ internal class SimpleLiveRecordManager2
                 // 刷新列表
                 if (!STOP_FLAG)
                 {
-                    await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList());
-                    DisableLiveSynthesisForImplicitIV();
-                    await UpdateRawM3u8Async();
+                    // P2-3：刷新失败健壮化。瞬时刷新错误（断网/超时/CDN 抖动）不应终止整个录制，
+                    // 也不应推进任何状态——记一条 WARN 后跳过本轮，等待下一轮重试；
+                    // 网络恢复后高水位号缺口检测会把空档识别为缺口并补齐。
+                    try
+                    {
+                        await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList(), CancellationTokenSource.Token);
+                        DisableLiveSynthesisForImplicitIV();
+                        await UpdateRawM3u8Async();
+                    }
+                    catch (OperationCanceledException) when (CancellationTokenSource.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException refreshEx)
+                    {
+                        Logger.WarnMarkUp($"[darkorange3_1]Playlist refresh timed out transiently, will retry next round: {refreshEx.Message.EscapeMarkup()}[/]");
+                    }
+                    catch (Exception refreshEx)
+                    {
+                        Logger.WarnMarkUp($"[darkorange3_1]Playlist refresh failed transiently, will retry next round: {refreshEx.Message.EscapeMarkup()}[/]");
+                    }
                 }
             }
             catch (OperationCanceledException oce) when (oce.CancellationToken == CancellationTokenSource.Token)
@@ -1080,6 +1220,11 @@ internal class SimpleLiveRecordManager2
     private void FilterMediaSegments(StreamSpec streamSpec, ProgressTask task, bool allHasDatetime, bool allSamePath)
     {
         if (string.IsNullOrEmpty(LastFileNameDic[task.Id]) && DateTimeDic[task.Id] == 0) return;
+
+        // P0-2：可预测 URL 流改走基于高水位号的稳健缺口检测（去重/单调/缺口补齐或入队），
+        // 与脆弱的 LastFileName/MaxIndex 配对状态解耦，避免回退/重叠 playlist 造成状态错位而漏检缺口。
+        if (TryFilterPredictableSegments(streamSpec, task))
+            return;
 
         var index = -1;
         var dateTime = DateTimeDic[task.Id];
@@ -1168,6 +1313,429 @@ internal class SimpleLiveRecordManager2
             return;
 
         streamSpec.Playlist!.MediaParts[0].MediaSegments = filledSegments;
+        MaxIndexDic[task.Id] = Math.Max(MaxIndexDic[task.Id], filledSegments.Max(s => s.Index));
+    }
+
+    // ===== P0/P1/P2 直播补片增强：高水位号缺口检测、待补缺口队列、合并空洞感知、收尾汇总 =====
+
+    private bool IsPredictableFillEnabled(ProgressTask task)
+    {
+        return DownloaderConfig.MyOptions.LiveFillSegmentsGap && TryGetPredictableSegmentUrlPattern(task, out _);
+    }
+
+    private static bool TryGetSegmentUrlNumber(MediaSegment segment, out long number)
+    {
+        var parts = ParseSegmentUrl(segment.Url);
+        return TryParseSegmentNumber(parts.FileNameWithoutExtension, out number);
+    }
+
+    private long GetInitialHighestEnqueuedNumber(StreamSpec item)
+    {
+        var segs = item.Playlist?.MediaParts[0].MediaSegments;
+        if (segs == null || segs.Count == 0) return 0L;
+        var last = segs[^1];
+        return TryGetSegmentUrlNumber(last, out var n) ? n : last.Index;
+    }
+
+    // P0-1：以 URL 数字单调更新高水位号（绝不回退）。
+    private void UpdateHighestEnqueuedNumber(int taskId, IReadOnlyList<MediaSegment> sent)
+    {
+        var max = HighestEnqueuedNumberDic.GetValueOrDefault(taskId);
+        foreach (var s in sent)
+        {
+            if (TryGetSegmentUrlNumber(s, out var n) && n > max)
+                max = n;
+        }
+        HighestEnqueuedNumberDic[taskId] = max;
+    }
+
+    // P0-3：滑动窗口取该流的 EXT-X-TARGETDURATION（秒/片）作为下限换算基准；未知时退化为 1。
+    private double GetGapWindowTargetDuration(StreamSpec streamSpec)
+    {
+        return streamSpec.Playlist?.TargetDuration is > 0 ? streamSpec.Playlist.TargetDuration!.Value : 1d;
+    }
+
+    private static IEnumerable<long> RangeInclusive(long start, long end)
+    {
+        for (var i = start; i <= end; i++)
+            yield return i;
+    }
+
+    // P0-3：把缺片号加入待补队列。已越过合并前沿（<= LastMergedNumber）的号无法按序利用，直接记 lost。
+    private void EnqueuePendingGaps(int taskId, IEnumerable<long> numbers, long window, bool countedInPlaylist)
+    {
+        var pending = PendingGapNumbersDic.GetOrAdd(taskId, _ => new SortedDictionary<long, PendingGapEntry>());
+        var lastMerged = LastMergedNumberDic.GetValueOrDefault(taskId);
+        var stats = GapStatsDic.GetOrAdd(taskId, _ => new LiveGapStats());
+
+        lock (pending)
+        {
+            foreach (var n in numbers)
+            {
+                if (n <= lastMerged)
+                {
+                    RecordLostGap(taskId, n);
+                    continue;
+                }
+
+                if (pending.TryGetValue(n, out var existing))
+                {
+                    if (existing.Window < window)
+                        existing.Window = window;
+                    existing.CountedInPlaylist |= countedInPlaylist;
+                    continue;
+                }
+
+                pending[n] = new PendingGapEntry { Attempts = 0, Window = window, CountedInPlaylist = countedInPlaylist };
+                stats.Deferred++;
+            }
+        }
+    }
+
+    private void EnqueuePendingGapRange(
+        int taskId,
+        LiveSegmentGapPlanner.GapRange range,
+        long window,
+        bool countedInPlaylist,
+        double targetDurationSeconds)
+    {
+        var maxExpandableCount = LiveSegmentGapPlanner.ComputeMaxExpandableGapCount(targetDurationSeconds);
+        var (expandRange, omittedRange) = LiveSegmentGapPlanner.CapGapRangeToLatest(range, maxExpandableCount);
+        if (omittedRange != null)
+        {
+            RecordLostGapRange(taskId, omittedRange.Value.Start, omittedRange.Value.End);
+            Logger.WarnMarkUp($"[darkorange3_1]Large predictable URL gap {range.Start} ~ {range.End} has {range.Count} missing segment(s); capped pending expansion to latest {expandRange.Count} segment(s) ({expandRange.Start} ~ {expandRange.End}) by EXT-X-TARGETDURATION={targetDurationSeconds.ToString("0.###", CultureInfo.InvariantCulture)}s.[/]");
+        }
+
+        EnqueuePendingGaps(taskId, RangeInclusive(expandRange.Start, expandRange.End), window, countedInPlaylist);
+    }
+
+    private void RecordLostGap(int taskId, long number)
+    {
+        var stats = GapStatsDic.GetOrAdd(taskId, _ => new LiveGapStats());
+        lock (stats.Lost)
+        {
+            stats.Lost.Add(number);
+        }
+    }
+
+    private void RecordLostGapRange(int taskId, long start, long end)
+    {
+        if (end < start)
+            return;
+
+        if (start == end)
+        {
+            RecordLostGap(taskId, start);
+            return;
+        }
+
+        var stats = GapStatsDic.GetOrAdd(taskId, _ => new LiveGapStats());
+        lock (stats.Lost)
+        {
+            stats.CompactLostRanges.Add(new SegmentNumberRange(start, end));
+        }
+    }
+
+    private long GetMergeBlockNumber(int taskId)
+    {
+        if (!PendingGapNumbersDic.TryGetValue(taskId, out var pending))
+            return long.MaxValue;
+        lock (pending)
+        {
+            return pending.Count > 0 ? pending.Keys.First() : long.MaxValue;
+        }
+    }
+
+    // P0-2：可预测 URL 流的稳健缺口检测。返回 true 表示已接管（newList 已写回 playlist），调用方直接返回。
+    private bool TryFilterPredictableSegments(StreamSpec streamSpec, ProgressTask task)
+    {
+        if (!IsPredictableFillEnabled(task))
+            return false;
+
+        var segs = streamSpec.Playlist!.MediaParts[0].MediaSegments;
+        if (segs.Count == 0)
+        {
+            streamSpec.Playlist!.MediaParts[0].MediaSegments = [];
+            return true;
+        }
+
+        // 解析编号 + 校验同 query；任一不满足则交回旧逻辑兜底。
+        var parsed = new List<(MediaSegment Seg, SegmentUrlParts Parts, long Num)>(segs.Count);
+        string? query = null;
+        foreach (var s in segs)
+        {
+            var parts = ParseSegmentUrl(s.Url);
+            if (!TryParseSegmentNumber(parts.FileNameWithoutExtension, out var num))
+                return false;
+            query ??= parts.Query;
+            if (parts.Query != query)
+                return false;
+            parsed.Add((s, parts, num));
+        }
+
+        // playlist 内必须严格递增
+        for (var i = 1; i < parsed.Count; i++)
+        {
+            if (parsed[i].Num <= parsed[i - 1].Num)
+                return false;
+        }
+
+        var hwm = HighestEnqueuedNumberDic.GetValueOrDefault(task.Id);
+
+        // 纯函数规划缺口：去重/抗回退（丢弃 <= 高水位号），并切出真实新片与缺口区间。
+        var plan = LiveSegmentGapPlanner.Plan(hwm, parsed.Select(p => p.Num).ToList());
+        if (plan.FreshNumbers.Count == 0)
+        {
+            // 无新片（含整段回退/重叠 playlist）：本轮不产出，消费者仍会 drain 待补队列。
+            streamSpec.Playlist!.MediaParts[0].MediaSegments = [];
+            return true;
+        }
+
+        // 所有缺口统一转入待补队列，由 subTask 受控并发补齐（不再行内补齐、不再丢弃）。
+        var gapWindowTd = GetGapWindowTargetDuration(streamSpec);
+        foreach (var range in plan.GapRanges)
+        {
+            EnqueuePendingGapRange(task.Id, range, LiveSegmentGapPlanner.ComputeGapWindow(range.Count, gapWindowTd), countedInPlaylist: false, targetDurationSeconds: gapWindowTd);
+            Logger.WarnMarkUp($"[darkorange3_1]Detected {range.Count} missing segment(s) in predictable URL pattern ({range.Start} ~ {range.End}); deferred to subTask fill queue.[/]");
+        }
+
+        // newList 只产出真实新片（升序，Index == URL 号；P1-3 可预测流不做 offset 重排）。
+        var result = new List<MediaSegment>(plan.FreshNumbers.Count);
+        foreach (var p in parsed)
+        {
+            if (p.Num <= hwm)
+                continue;
+            p.Seg.Index = p.Num;
+            result.Add(p.Seg);
+        }
+
+        streamSpec.Playlist!.MediaParts[0].MediaSegments = result;
+        return true;
+    }
+
+    // P0-3/P1-1：作为 subTask 受控并发补发待补缺口分片（与 live-from-start 共用并发数/镜像/下载原语）；
+    // 每次下载重试 = --download-retry-count（录制后缺片极大概率仍在服务端）；
+    // 成功并入 fileDic 参与按序合并，越窗/超次则放弃并记 lost。
+    private async Task DrainPendingGapsAsync(
+        StreamSpec streamSpec,
+        ProgressTask task,
+        SpeedContainer speedContainer,
+        string tmpDir,
+        Dictionary<string, string> headers,
+        string[] hostMirrors,
+        ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
+        MediaSegment template,
+        bool allSamePath)
+    {
+        if (!IsPredictableFillEnabled(task))
+            return;
+        if (!PendingGapNumbersDic.TryGetValue(task.Id, out var pending))
+            return;
+
+        var parallel = GetSubTaskParallelism();
+        var retryCount = Math.Max(0, DownloaderConfig.MyOptions.DownloadRetryCount);
+        var hwm = HighestEnqueuedNumberDic.GetValueOrDefault(task.Id);
+
+        List<long> batch;
+        lock (pending)
+        {
+            // 滑动窗口驱逐：落后直播边缘超过 window 的号判定为 CDN 已滑出，放弃。
+            var evict = pending.Where(kv => LiveSegmentGapPlanner.ShouldEvictByWindow(hwm, kv.Key, kv.Value.Window)).Select(kv => kv.Key).ToList();
+            foreach (var n in evict)
+            {
+                pending.Remove(n);
+                RecordLostGap(task.Id, n);
+            }
+            if (pending.Count == 0)
+                return;
+            batch = pending.Keys.Take(parallel).ToList();
+        }
+
+        if (batch.Count == 0)
+            return;
+
+        var templateParts = ParseSegmentUrl(template.Url);
+        if (!TryParseSegmentNumber(templateParts.FileNameWithoutExtension, out var templateNumber))
+            return;
+
+        var duration = streamSpec.Playlist?.TargetDuration is > 0
+            ? streamSpec.Playlist.TargetDuration.Value
+            : (template.Duration > 0 ? template.Duration : 1);
+
+        // 与 live-from-start 共享同一套 subTask 下载原语（前半镜像竞速）。
+        // 缺口分片是录制开始后因故未下到的、极大概率仍在服务端的分片，故每次下载重试 = --download-retry-count。
+        var ctx = new SubTaskDownloadContext(
+            Template: template,
+            TemplateUrlParts: templateParts,
+            TemplateNumber: templateNumber,
+            SegmentDuration: duration,
+            AllHasDatetime: false,
+            AllSamePath: allSamePath,
+            TmpDir: tmpDir,
+            Extension: streamSpec.Extension ?? "clip",
+            SpeedContainer: speedContainer,
+            Headers: headers,
+            RetryCount: retryCount,
+            HostMirrors: hostMirrors);
+
+        var downloads = batch.Select(async number =>
+        {
+            var (s, r) = await DownloadSubTaskSegmentAsync(ctx, number, CancellationTokenSource.Token);
+            return (Number: number, Segment: s, Result: r);
+        }).ToList();
+
+        var results = await Task.WhenAll(downloads);
+
+        var stats = GapStatsDic.GetOrAdd(task.Id, _ => new LiveGapStats());
+        lock (pending)
+        {
+            foreach (var (number, seg, result) in results)
+            {
+                if (seg != null && result is { Success: true })
+                {
+                    var countedInPlaylist = pending.TryGetValue(number, out var entry) && entry.CountedInPlaylist;
+                    fileDic[seg] = result;
+                    pending.Remove(number);
+                    stats.Filled++;
+                    if (!countedInPlaylist)
+                    {
+                        lock (lockObj)
+                        {
+                            task.MaxValue += 1;
+                        }
+                        RefreshedDurDic.AddOrUpdate(task.Id, seg.Duration, (_, old) => old + seg.Duration);
+                    }
+                    task.Increment(1);
+                }
+                else if (pending.TryGetValue(number, out var entry))
+                {
+                    entry.Attempts++;
+                    if (LiveSegmentGapPlanner.ShouldEvictByRetry(entry.Attempts, retryCount))
+                    {
+                        pending.Remove(number);
+                        RecordLostGap(task.Id, number);
+                        TryDeleteDownloadResult(result);
+                    }
+                }
+            }
+        }
+    }
+
+    // P2-1：解析本轮合并可写到的上界（独占）。仅写"最低待补号"之前的分片；
+    // 若空洞之后已有分片在等待且超过宽限期，则放弃该洞（记 lost）并放行，避免无限阻塞直播输出。
+    private long ResolveMergeWritableBound(int taskId, ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic)
+    {
+        // 合并暂缓的时间宽限取 --http-request-timeout（秒，默认 100），与单次请求超时同量级；下限 1 秒。
+        var graceMs = Math.Max(1000d, DownloaderConfig.MyOptions.HttpRequestTimeout * 1000d);
+        while (true)
+        {
+            var block = GetMergeBlockNumber(taskId);
+            if (block == long.MaxValue)
+            {
+                MergeHoldDic.TryRemove(taskId, out _);
+                return long.MaxValue;
+            }
+
+            var hasHeldBack = fileDic.Any(f => f.Value is { Success: true } && f.Key.Index > block);
+            if (!hasHeldBack)
+            {
+                MergeHoldDic.TryRemove(taskId, out _);
+                return block;
+            }
+
+            var now = DateTime.UtcNow;
+            var hold = MergeHoldDic.GetOrAdd(taskId, _ => (block, now));
+            if (hold.BlockNumber != block)
+            {
+                hold = (block, now);
+                MergeHoldDic[taskId] = hold;
+            }
+
+            if ((now - hold.Since).TotalMilliseconds < graceMs)
+                return block;
+
+            // 宽限超时：放弃该洞，越过它继续。
+            if (PendingGapNumbersDic.TryGetValue(taskId, out var pending))
+            {
+                lock (pending)
+                {
+                    pending.Remove(block);
+                }
+            }
+            RecordLostGap(taskId, block);
+            MergeHoldDic.TryRemove(taskId, out _);
+            Logger.WarnMarkUp($"[darkorange3_1]Real-time merge skipped unfilled gap at segment {block} after grace period; marking it lost to avoid stalling live output.[/]");
+        }
+    }
+
+    // P2-2：实时录制补洞收尾汇总。
+    private void LogLiveGapSummary(int taskId, string streamLabel)
+    {
+        if (!GapStatsDic.TryGetValue(taskId, out var stats))
+            return;
+
+        long lostCount;
+        string lostRanges;
+        lock (stats.Lost)
+        {
+            var compactRanges = stats.CompactLostRanges
+                .Concat(stats.Lost.Select(n => new SegmentNumberRange(n, n)))
+                .ToList();
+            lostCount = compactRanges.Sum(r => r.Count);
+            lostRanges = compactRanges.Count > 0 ? FormatSegmentNumberRanges(compactRanges) : "none";
+        }
+
+        long pendingCount = 0;
+        string pendingRanges = "none";
+        if (PendingGapNumbersDic.TryGetValue(taskId, out var pending))
+        {
+            lock (pending)
+            {
+                pendingCount = pending.Count;
+                pendingRanges = pending.Count > 0 ? FormatContiguousIndexRanges(pending.Keys.ToList()) : "none";
+            }
+        }
+
+        if (stats.Filled == 0 && stats.Deferred == 0 && lostCount == 0)
+            return;
+
+        Logger.InfoMarkUp($"[darkorange3_1]Live gap-fill summary for {streamLabel}: filled={stats.Filled}, deferred={stats.Deferred}, lost={lostCount} ({lostRanges}), still_pending={pendingCount} ({pendingRanges}).[/]");
+        if (lostCount > 0)
+        {
+            Logger.WarnMarkUp($"[darkorange3_1]Live gap-fill: {lostCount} segment(s) ultimately lost for {streamLabel}: {lostRanges}.[/]");
+        }
+    }
+
+    private static string FormatSegmentNumberRanges(IEnumerable<SegmentNumberRange> ranges)
+    {
+        var ordered = ranges
+            .Where(r => r.End >= r.Start)
+            .OrderBy(r => r.Start)
+            .ThenBy(r => r.End)
+            .ToList();
+        if (ordered.Count == 0)
+            return "none";
+
+        var merged = new List<SegmentNumberRange>();
+        var current = ordered[0];
+        for (var i = 1; i < ordered.Count; i++)
+        {
+            var next = ordered[i];
+            if (current.End == long.MaxValue || next.Start <= current.End + 1)
+            {
+                current = new SegmentNumberRange(current.Start, Math.Max(current.End, next.End));
+                continue;
+            }
+
+            merged.Add(current);
+            current = next;
+        }
+        merged.Add(current);
+
+        return string.Join(", ", merged.Select(r => r.Start == r.End
+            ? r.Start.ToString(CultureInfo.InvariantCulture)
+            : $"{r.Start.ToString(CultureInfo.InvariantCulture)} ~ {r.End.ToString(CultureInfo.InvariantCulture)}"));
     }
 
     private async Task DownloadLiveFromStartSegmentsAsync(
@@ -1207,21 +1775,15 @@ internal class SimpleLiveRecordManager2
             if (backfillSegmentDuration <= 0)
                 backfillSegmentDuration = 1;
 
-            var liveFromStartParallel = GetLiveFromStartParallel();
+            var subTaskParallelism = GetSubTaskParallelism();
 
-            // 增强③（多镜像分流，精细化）：
-            // live-from-start 中所有镜像竞速统一只使用按顺序的前半部分，避免对全部镜像逐一施压。
-            var effectiveMirrors = DownloaderConfig.MyOptions.LiveHostMirrors?
-                .Where(m => !string.IsNullOrWhiteSpace(m)).ToArray() ?? [];
-            // 镜像取前半部分（向下取整），但至少保留 1 个：1→1、2→1、3→1、4→2 ...
-            var liveFromStartHostMirrors = effectiveMirrors.Length > 0
-                ? effectiveMirrors.Take(Math.Max(1, effectiveMirrors.Length / 2)).ToArray()
-                : [];
-            var hasMirrors = liveFromStartHostMirrors.Length > 0;
+            // subTask 镜像竞速统一使用前半镜像子集（与待补缺口填充共用 GetSubTaskMirrorHosts）。
+            var subTaskHostMirrors = GetSubTaskMirrorHosts();
+            var hasMirrors = subTaskHostMirrors.Length > 0;
 
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: host mirrors for racing -> {string.Join(", ", liveFromStartHostMirrors.Select(m => m.EscapeMarkup()))}.[/]");
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start: host mirrors for racing -> {string.Join(", ", subTaskHostMirrors.Select(m => m.EscapeMarkup()))}.[/]");
 
-            var ctx = new LiveFromStartContext(
+            var ctx = new SubTaskDownloadContext(
                 Template: firstSegment,
                 TemplateUrlParts: firstUrlParts,
                 TemplateNumber: firstNumber,
@@ -1232,26 +1794,25 @@ internal class SimpleLiveRecordManager2
                 Extension: streamSpec.Extension ?? "clip",
                 SpeedContainer: speedContainer,
                 Headers: headers,
-                // 探测重试：候选总 host > 1（含原始URL + 前半镜像）时单 host 偶发失败由竞速兜底，
-                // 且边界点是"当前 live-from-start host 集合不可用"，无需逐 host 重试（重试的 1000ms 延迟是探测主要耗时点），故置 0；
-                // 单 host 时才保留 1 次，避免把瞬时抖动误判成可用边界。
-                ProbeRetryCount: hasMirrors ? 0 : 1,
-                HostMirrors: liveFromStartHostMirrors);
+                // live-from-start 补充的是历史分片，属可放弃对象：有镜像时单 host 偶发失败由竞速兜底，置 0；
+                // 无镜像时保留 1 次，避免把瞬时抖动误判成不可用边界。
+                RetryCount: hasMirrors ? 0 : 1,
+                HostMirrors: subTaskHostMirrors);
 
             // 增强②（缓存复用）：探测阶段命中过的 number 进缓存，回填阶段直接复用其已下载文件，绝不重复请求。
             // 增强③（多镜像分流）：所有探测与回填下载都经由 Downloader.DownloadSegmentAsync，
-            // 并统一传入 live-from-start 的前半镜像列表，天然把探测/回填压力分散到镜像。
+            // 并统一传入 subTask 的前半镜像列表，天然把探测/回填压力分散到镜像。
             var downloadCache = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
 
             Logger.InfoMarkUp($"[darkorange3_1]Live from start: locating earliest available segment before {firstNumber} for {streamLabel}.[/]");
 
             // ===== 阶段 1：指数探测 + 二分，对数次请求内定位最早可用边界 E0 =====
-            var (earliestNumber, lastRequestUrl, useDescending) = await LocateEarliestAvailableLiveFromStartNumberAsync(ctx, firstNumber, 0, downloadCache, backfillCts.Token);
+            var (earliestNumber, _, useDescending) = await LocateEarliestAvailableLiveFromStartNumberAsync(ctx, firstNumber, 0, downloadCache, backfillCts.Token);
 
             var upper = firstNumber - 1;
 
             // 边界情况：可用区很浅 -> 倒序下载方案（从 S-1 并发向下镜像竞速、遇首个确认不可得即停、保留连续段接边）。
-            // 倒序不锁定 host，故此处无需计算/锁定 pinned host。
+            // 倒序不锁定 host，故此处无需计算/锁定单 Host。
             if (useDescending)
             {
                 await BackfillDescendingAsync(ctx, task, streamLabel, upper, 0, fileDic, downloadCache, backfillCts);
@@ -1264,56 +1825,35 @@ internal class SimpleLiveRecordManager2
                 return;
             }
 
-            // 仅在确实启用了镜像时才锁定到最后一次请求的 host（升序回填用）；否则保持默认（本就单 host）。
-            var pinnedAuthority = hasMirrors ? TryParseUrlAuthority(lastRequestUrl) : null;
-            if (pinnedAuthority != null)
-                Logger.InfoMarkUp($"[darkorange3_1]Live from start: pinning backfill host to [cyan]{pinnedAuthority.Host.EscapeMarkup()}[/] for {streamLabel} (no multi-host racing).[/]");
-
             var boundaryNumber = earliestNumber.Value - 1;
             Logger.InfoMarkUp($"[darkorange3_1]Live from start: earliest available segment is {earliestNumber.Value} for {streamLabel}; backfilling ascending {earliestNumber.Value} ~ {upper}.[/]");
 
             // ===== 阶段 2：从 E0 升序高并发回填，跑在过期边界前面 =====
             // 关键：始终优先派发"当前最旧"未下载分片；只要下载快于实时（R·segDur>1），
             // 升序前沿恒高于回退的过期边界，理论零丢失。若某段确已过期则按需跳过（reactive，无需预测安全余量）。
-            // E0 附近最贴近过期边界，先用镜像竞速抢救；连续稳定成功后切到 pinned host 降低带宽压力。
-            // pinned-first 中若连续失败或靠 fallback 恢复过多，说明 pinned host 不稳定，切回 mirror-first。
-            var mirrorStableSuccessThreshold = Math.Max(3, liveFromStartParallel * 2);
-            var pinnedUnstableThreshold = Math.Max(6, liveFromStartParallel);
-            var mirrorFirstMode = true;
-            var consecutiveMirrorFirstSuccesses = 0;
-            var consecutivePinnedFailures = 0;
-            var pinnedFallbackRecoveries = 0;
-
+            // 统一使用 subTask 前半镜像竞速下载（与待补缺口填充同一套原语），不再切换单 Host。
             var nextDispatch = earliestNumber.Value;
             var nextCommit = earliestNumber.Value;
-            var inFlight = new Dictionary<long, Task<LiveFromStartBackfillResolved>>();
-            var resolved = new Dictionary<long, LiveFromStartBackfillResolved>();
+            var inFlight = new Dictionary<long, Task<(MediaSegment? Segment, DownloadResult? Result)>>();
+            var resolved = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
             var downloadedSegments = new List<MediaSegment>();
             var committed = new HashSet<long>();
             var discardedExpiredNumbers = new List<long>();
             var dispatchCount = 0;
             var discardedCleanupCount = 0;
-            var recoveredByFallbackCount = 0;
 
             while (!STOP_FLAG && !backfillCts.IsCancellationRequested && nextCommit <= upper)
             {
                 // 升序派发
-                while (inFlight.Count < liveFromStartParallel && nextDispatch <= upper
+                while (inFlight.Count < subTaskParallelism && nextDispatch <= upper
                        && !STOP_FLAG && !backfillCts.IsCancellationRequested)
                 {
                     var number = nextDispatch;
                     if (downloadCache.TryGetValue(number, out var cached))
-                    {
-                        // 探测/小窗口缓存命中只复用文件，不参与 mirror-first / pinned-first 状态统计。
-                        var mode = mirrorFirstMode ? LiveFromStartBackfillMode.MirrorFirst : LiveFromStartBackfillMode.PinnedFirst;
-                        resolved[number] = new LiveFromStartBackfillResolved(cached.Segment, cached.Result, false, mode, CountForStats: false);
-                    }
+                        resolved[number] = (cached.Segment, cached.Result);
                     else
                     {
-                        var mode = mirrorFirstMode || pinnedAuthority == null
-                            ? LiveFromStartBackfillMode.MirrorFirst
-                            : LiveFromStartBackfillMode.PinnedFirst;
-                        inFlight[number] = CreateAndDownloadBackfillSegmentAsync(ctx, number, pinnedAuthority, backfillCts.Token, mode);
+                        inFlight[number] = DownloadSubTaskSegmentAsync(ctx, number, backfillCts.Token);
                         dispatchCount++;
                     }
                     nextDispatch++;
@@ -1334,53 +1874,12 @@ internal class SimpleLiveRecordManager2
                         }
                         task.Increment(1);
                         RefreshedDurDic.AddOrUpdate(task.Id, segment.Duration, (_, old) => old + segment.Duration);
-
-                        if (done.Mode == LiveFromStartBackfillMode.MirrorFirst)
-                        {
-                            if (done.CountForStats)
-                            {
-                                consecutivePinnedFailures = 0;
-                                pinnedFallbackRecoveries = 0;
-                                if (pinnedAuthority != null && mirrorFirstMode && ++consecutiveMirrorFirstSuccesses >= mirrorStableSuccessThreshold)
-                                {
-                                    mirrorFirstMode = false;
-                                    consecutiveMirrorFirstSuccesses = 0;
-                                    Logger.InfoMarkUp($"[darkorange3_1]Live from start: switching to pinned-first at segment {nextCommit} for {streamLabel} after {mirrorStableSuccessThreshold} mirror-first success(es); reducing mirror pressure.[/]");
-                                }
-                            }
-                        }
-                        else
-                        {
-                            if (done.CountForStats)
-                            {
-                                consecutiveMirrorFirstSuccesses = 0;
-                                consecutivePinnedFailures = 0;
-                                if (done.Recovered && ++pinnedFallbackRecoveries >= pinnedUnstableThreshold)
-                                {
-                                    mirrorFirstMode = true;
-                                    pinnedFallbackRecoveries = 0;
-                                    Logger.InfoMarkUp($"[darkorange3_1]Live from start: switching back to mirror-first at segment {nextCommit} for {streamLabel} after {pinnedUnstableThreshold} fallback recovery event(s); pinned host is unstable.[/]");
-                                }
-                            }
-                        }
                     }
                     else
                     {
-                        // 该分片经当前策略确认不可得——记录编号、跳过并清理
+                        // 该分片经镜像竞速确认不可得——记录编号、跳过并清理
                         discardedExpiredNumbers.Add(nextCommit);
                         TryDeleteDownloadResult(done.Result);
-
-                        if (done.CountForStats)
-                            consecutiveMirrorFirstSuccesses = 0;
-                        if (done.CountForStats && done.Mode == LiveFromStartBackfillMode.PinnedFirst && ++consecutivePinnedFailures >= pinnedUnstableThreshold)
-                        {
-                            if (!mirrorFirstMode)
-                            {
-                                mirrorFirstMode = true;
-                                pinnedFallbackRecoveries = 0;
-                                Logger.InfoMarkUp($"[darkorange3_1]Live from start: switching back to mirror-first at segment {nextCommit} for {streamLabel} after {pinnedUnstableThreshold} consecutive pinned-first failure(s); pinned host is unstable.[/]");
-                            }
-                        }
                     }
                     nextCommit++;
                 }
@@ -1399,10 +1898,7 @@ internal class SimpleLiveRecordManager2
                 var finished = await Task.WhenAny(inFlight.Values);
                 var finishedNumber = inFlight.First(kv => kv.Value == finished).Key;
                 inFlight.Remove(finishedNumber);
-                var finishedResult = await finished;
-                if (finishedResult.Recovered)
-                    recoveredByFallbackCount++;
-                resolved[finishedNumber] = finishedResult;
+                resolved[finishedNumber] = await finished;
             }
 
             // ===== 收尾：取消并清理未提交的下载文件 =====
@@ -1436,19 +1932,19 @@ internal class SimpleLiveRecordManager2
             }
 
             downloadedSegments.Sort((left, right) => left.Index.CompareTo(right.Index));
-            discardedExpiredNumbers.Sort();
 
             // ===== 关键：只保留"连接到直播边缘的连续段" =====
             // DVR 窗口最旧端往往参差不齐（老片正被 CDN 逐步轮转删除），二分只能定位到"个体可用的最低片" E0，
-            // 它可能落在参差区底部，其上方仍存在无法补齐的空洞（当前 live-from-start host 集合 404）。这些空洞之下的碎片即使下到了，
+            // 它可能落在参差区底部，其上方仍存在无法补齐的空洞（当前 subTask host 集合 404）。这些空洞之下的碎片即使下到了，
             // 也无法跨过空洞与直播边缘连续拼接，对输出毫无价值，反而会在合并产物里制造断点。
-            // 因此以"最高不可补齐空洞 G"为界：丢弃所有 index <= G 的已下载碎片，仅保留连续的 (G, upper]。
+            // 放弃上界决策（取最高不可补齐空洞 G）共享自 LiveSegmentGapPlanner；此处只做对应的副作用清理。
             var abandonedFragmentCount = 0;
             long? abandonedTailFloor = null;
             long? abandonedTailCeil = null;
-            if (discardedExpiredNumbers.Count > 0 && downloadedSegments.Count > 0)
+            var abandonCeil = LiveSegmentGapPlanner.ResolveUnfillableHistoryCeil(
+                downloadedSegments.Select(s => s.Index).ToList(), discardedExpiredNumbers);
+            if (abandonCeil is { } highestGap)
             {
-                var highestGap = discardedExpiredNumbers[^1];
                 var fragments = downloadedSegments.Where(s => s.Index <= highestGap).ToList();
                 if (fragments.Count > 0)
                 {
@@ -1488,7 +1984,7 @@ internal class SimpleLiveRecordManager2
             var abandonedTailRange = abandonedTailCeil != null
                 ? FormatSegmentRanges([new MissingSegmentRange(abandonedTailFloor!.Value, abandonedTailCeil.Value, SegmentGapSource.CurrentPlaylist)])
                 : "none";
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start summary for {streamLabel}: accepted_total={downloadedSegments.Count}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}, boundary_probes={downloadCache.Count}, downloads_started={startedDownloads}, recovered_by_fallback={recoveredByFallbackCount}, abandoned_tail={abandonedTailRange}, abandoned_fragments={abandonedFragmentCount}, unfillable_gaps={discardedExpiredNumbers.Count}, discarded_cleanup={discardedCleanupCount}.[/]");
+            Logger.InfoMarkUp($"[darkorange3_1]Live from start summary for {streamLabel}: accepted_total={downloadedSegments.Count}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}, boundary_probes={downloadCache.Count}, downloads_started={startedDownloads}, abandoned_tail={abandonedTailRange}, abandoned_fragments={abandonedFragmentCount}, unfillable_gaps={discardedExpiredNumbers.Count}, discarded_cleanup={discardedCleanupCount}.[/]");
 
             if (downloadedSegments.Count > 0)
             {
@@ -1514,11 +2010,10 @@ internal class SimpleLiveRecordManager2
     /// 边界情况的倒序回填方案（可用区很浅，如刚开播只缺开头一分钟以内的分片）。
     /// 从 upper(=S-1) 并发向下下载，按降序提交，遇到第一个"镜像竞速后仍不可得"的分片即停，
     /// 保留 [boundary+1, upper] 这段连续片接到直播边缘。区间短、几乎不受过期影响，且天然连续、无需参差裁剪。
-    /// 与升序回填不同：倒序**不锁定 host、直接使用 live-from-start 镜像子集竞速**（区间短，竞速代价可接受且更快更稳）；
-    /// 重试次数走 GetLiveFromStartDownloadRetryCount()（有镜像=0、无镜像=1）。
+    /// 倒序直接使用 subTask 前半镜像子集竞速（区间短，竞速代价可接受且更快更稳），重试次数取 ctx.RetryCount（有镜像=0、无镜像=1）。
     /// </summary>
     private async Task BackfillDescendingAsync(
-        LiveFromStartContext ctx,
+        SubTaskDownloadContext ctx,
         ProgressTask task,
         string streamLabel,
         long upper,
@@ -1597,7 +2092,7 @@ internal class SimpleLiveRecordManager2
     }
 
     private async Task<LiveFromStartDescendingScanResult> RunDescendingMirrorRaceScanAsync(
-        LiveFromStartContext ctx,
+        SubTaskDownloadContext ctx,
         long upper,
         long floor,
         Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
@@ -1605,7 +2100,7 @@ internal class SimpleLiveRecordManager2
         bool cacheCompletedDownloads,
         Action<long, MediaSegment, DownloadResult, bool>? onCommitSuccess = null)
     {
-        var parallel = GetLiveFromStartParallel();
+        var parallel = GetSubTaskParallelism();
         var nextDispatch = upper;
         var nextCommit = upper;
         var inFlight = new Dictionary<long, Task<(MediaSegment Segment, DownloadResult? Result)>>();
@@ -1682,11 +2177,10 @@ internal class SimpleLiveRecordManager2
     }
 
     /// <summary>
-    /// 构造并下载指定编号的回填分片：使用 live-from-start 镜像子集竞速。
-    /// 重试次数走 GetLiveFromStartDownloadRetryCount()（有镜像=0、无镜像=1）。用于倒序回填方案。
+    /// 构造并下载指定编号的回填分片：使用 subTask 前半镜像子集竞速，重试次数取 ctx.RetryCount。用于倒序回填方案。
     /// </summary>
     private async Task<(MediaSegment Segment, DownloadResult? Result)> CreateAndDownloadMirrorRaceSegmentAsync(
-        LiveFromStartContext ctx,
+        SubTaskDownloadContext ctx,
         long number,
         CancellationToken cancellationToken)
     {
@@ -1696,7 +2190,7 @@ internal class SimpleLiveRecordManager2
 
         var filename = GetSegmentName(candidate, ctx.AllHasDatetime, ctx.AllSamePath);
         var path = Path.Combine(ctx.TmpDir, filename + $".{ctx.Extension}.tmp");
-        return await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: ctx.HostMirrors);
+        return await DownloadSubTaskSegmentRawAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, ctx.RetryCount, ctx.HostMirrors);
     }
 
     /// <summary>
@@ -1707,7 +2201,7 @@ internal class SimpleLiveRecordManager2
     /// 若 sentinel 之下没有任何可用分片则 E0 为 null；
     /// 若检测到"可用区很浅"（首次失败发生在 depth&gt;60 且此前最深仅确认到 depth≤60）则 UseDescending 为 true（E0 不再有意义，交由倒序方案处理）。</returns>
     private async Task<(long? Earliest, string? LastRequestUrl, bool UseDescending)> LocateEarliestAvailableLiveFromStartNumberAsync(
-        LiveFromStartContext ctx,
+        SubTaskDownloadContext ctx,
         long topAvailableSentinel,
         long floor,
         Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
@@ -1878,7 +2372,7 @@ internal class SimpleLiveRecordManager2
     /// 探测使用 ctx.HostMirrors（多镜像时为前半部分），以减小对数次探测对镜像的压力。
     /// </summary>
     private async Task<(MediaSegment? Segment, DownloadResult? Result)> ProbeLiveFromStartNumberAsync(
-        LiveFromStartContext ctx,
+        SubTaskDownloadContext ctx,
         Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
         long number,
         CancellationToken cancellationToken)
@@ -1903,55 +2397,29 @@ internal class SimpleLiveRecordManager2
         var probeTimeoutSec = Math.Clamp(WAIT_SEC * 2, 2, 5);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(probeTimeoutSec));
-        var (_, result) = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, timeoutCts.Token, ctx.ProbeRetryCount, ctx.HostMirrors);
+        var (_, result) = await DownloadSubTaskSegmentRawAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, timeoutCts.Token, ctx.RetryCount, ctx.HostMirrors);
         var entry = ((MediaSegment?)candidate, result);
         cache[number] = entry;
         return entry;
     }
 
     /// <summary>
-    /// 阶段 2：构造并下载指定编号的回填分片（并发安全，不写共享缓存）。
-    /// MirrorFirst 直接使用 live-from-start 镜像子集竞速；PinnedFirst 优先锁定到最后一次请求的 host，失败后再镜像竞速兜底。
-    /// 返回值 Recovered 标识 PinnedFirst 中 pinned host 失败后由镜像竞速救回；CountForStats 标识是否参与策略切换统计。
+    /// subTask 共享原语：构造并下载指定编号的分片（并发安全，不写共享缓存），统一使用前半镜像竞速。
+    /// 供 live-from-start 升序回填与待补缺口填充共用。
     /// </summary>
-    private async Task<LiveFromStartBackfillResolved> CreateAndDownloadBackfillSegmentAsync(
-        LiveFromStartContext ctx,
+    private async Task<(MediaSegment? Segment, DownloadResult? Result)> DownloadSubTaskSegmentAsync(
+        SubTaskDownloadContext ctx,
         long number,
-        Uri? pinnedAuthority,
-        CancellationToken cancellationToken,
-        LiveFromStartBackfillMode mode)
+        CancellationToken cancellationToken)
     {
         var candidate = CreateFilledSegment(ctx.Template, ctx.TemplateUrlParts, number, ctx.TemplateNumber, ctx.SegmentDuration);
         if (candidate == null)
-            return new LiveFromStartBackfillResolved(new MediaSegment { Index = number }, null, false, mode, CountForStats: false);
+            return (null, null);
 
         var filename = GetSegmentName(candidate, ctx.AllHasDatetime, ctx.AllSamePath);
         var path = Path.Combine(ctx.TmpDir, filename + $".{ctx.Extension}.tmp");
-
-        if (mode == LiveFromStartBackfillMode.MirrorFirst || pinnedAuthority == null)
-        {
-            var mirrorRace = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: ctx.HostMirrors);
-            return new LiveFromStartBackfillResolved(mirrorRace.Segment, mirrorRace.Result, false, LiveFromStartBackfillMode.MirrorFirst, CountForStats: true);
-        }
-
-        // 锁定 host 单点下载（hostMirrorsOverride 传空数组 => 不竞速）
-        var originalUrl = candidate.Url;
-        if (!UrlHasAuthority(originalUrl, pinnedAuthority))
-            candidate.Url = RewriteUrlAuthority(originalUrl, pinnedAuthority);
-        var pinned = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: []);
-        if (pinned.Result is { Success: true })
-            return new LiveFromStartBackfillResolved(pinned.Segment, pinned.Result, false, LiveFromStartBackfillMode.PinnedFirst, CountForStats: true);
-
-        if (STOP_FLAG || cancellationToken.IsCancellationRequested)
-            return new LiveFromStartBackfillResolved(candidate, null, false, LiveFromStartBackfillMode.PinnedFirst, CountForStats: false);
-
-        // 兜底：锁定 host 缺该片 -> 恢复原始 URL，回退一次 live-from-start 镜像子集竞速。
-        candidate.Url = originalUrl;
-        var fallbackRace = await DownloadLiveFromStartSegmentAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, hostMirrorsOverride: ctx.HostMirrors);
-        var recovered = fallbackRace.Result is { Success: true };
-        if (recovered)
-            Logger.DebugMarkUp($"[grey]Live from start: segment {number} missing on pinned host, recovered via mirror race.[/]");
-        return new LiveFromStartBackfillResolved(fallbackRace.Segment, fallbackRace.Result, recovered, LiveFromStartBackfillMode.PinnedFirst, CountForStats: true);
+        var (segment, result) = await DownloadSubTaskSegmentRawAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, cancellationToken, ctx.RetryCount, ctx.HostMirrors);
+        return (segment, result);
     }
 
     private static Uri? TryParseUrlAuthority(string? url)
@@ -1962,47 +2430,20 @@ internal class SimpleLiveRecordManager2
         return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri : null;
     }
 
-    private static bool UrlHasAuthority(string url, Uri authority)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-            return false;
-
-        return string.Equals(uri.Scheme, authority.Scheme, StringComparison.OrdinalIgnoreCase)
-               && string.Equals(uri.Host, authority.Host, StringComparison.OrdinalIgnoreCase)
-               && uri.Port == authority.Port;
-    }
-
-    private static string RewriteUrlAuthority(string url, Uri authority)
-    {
-        try
-        {
-            var ub = new UriBuilder(new Uri(url))
-            {
-                Scheme = authority.Scheme,
-                Host = authority.Host,
-                Port = authority.IsDefaultPort ? -1 : authority.Port,
-            };
-            return ub.Uri.AbsoluteUri;
-        }
-        catch
-        {
-            return url;
-        }
-    }
-
-    private async Task<(MediaSegment Segment, DownloadResult? Result)> DownloadLiveFromStartSegmentAsync(
+    // subTask 共享底座：底层镜像竞速下载（live-from-start 探测/升序/倒序回填与待补缺口填充共用）。
+    private async Task<(MediaSegment Segment, DownloadResult? Result)> DownloadSubTaskSegmentRawAsync(
         MediaSegment segment,
         string path,
         SpeedContainer speedContainer,
         Dictionary<string, string> headers,
         CancellationToken cancellationToken,
-        int? retryCount = null,
+        int retryCount,
         string[]? hostMirrorsOverride = null)
     {
         try
         {
             var effectiveHostMirrors = hostMirrorsOverride ?? [];
-            var result = await Downloader.DownloadSegmentAsync(segment, path, speedContainer, headers, retryCount ?? GetLiveFromStartDownloadRetryCount(effectiveHostMirrors), cancellationToken, effectiveHostMirrors);
+            var result = await Downloader.DownloadSegmentAsync(segment, path, speedContainer, headers, retryCount, cancellationToken, effectiveHostMirrors);
             return (segment, result);
         }
         catch
@@ -2011,16 +2452,23 @@ internal class SimpleLiveRecordManager2
         }
     }
 
-    private int GetLiveFromStartParallel()
+    // 辅助下载子任务（live-from-start 回填、待补缺口填充等补洞逻辑）的并发数：
+    // 取主线程数的一半（至少 1），并封顶 16，避免补洞抢占过多带宽影响实时下载。
+    private int GetSubTaskParallelism()
     {
-        const int maxLiveFromStartParallel = 16;
-        var threadCount = Math.Max(1, DownloaderConfig.MyOptions.ThreadCount);
-        return Math.Min(maxLiveFromStartParallel, Math.Max(threadCount / 2, 1));
+        const int maxSubTaskParallelism = 16;
+        return Math.Min(maxSubTaskParallelism, Math.Max(1, DownloaderConfig.MyOptions.ThreadCount / 2));
     }
 
-    private static int GetLiveFromStartDownloadRetryCount(string[] hostMirrors)
+    // 辅助下载子任务（live-from-start 回填、待补缺口填充）统一使用的镜像 host 子集：
+    // 取 --live-host-mirror 的前半部分（向下取整，至少 1 个），避免对全部镜像逐一施压。
+    private string[] GetSubTaskMirrorHosts()
     {
-        return hostMirrors.Length > 0 && hostMirrors.Any(m => !string.IsNullOrWhiteSpace(m)) ? 0 : 1;
+        var mirrors = DownloaderConfig.MyOptions.LiveHostMirrors?
+            .Where(m => !string.IsNullOrWhiteSpace(m)).ToArray() ?? [];
+        return mirrors.Length > 0
+            ? mirrors.Take(Math.Max(1, mirrors.Length / 2)).ToArray()
+            : [];
     }
 
     private static bool TryDeleteDownloadResult(DownloadResult? result)
@@ -2150,13 +2598,9 @@ internal class SimpleLiveRecordManager2
             segmentInfos.Add((segment, urlParts, number));
         }
 
+        // 注：可预测流的主路径已由 TryFilterPredictableSegments + 待补队列接管；
+        // 本方法仅作非可预测流/中途解析异常的兜底，缺口直接补齐（无上限、无丢弃）。
         var shouldFill = missingCount > 0;
-        var maxFill = DownloaderConfig.MyOptions.LiveFillSegmentsGapMax!.Value;
-        if (missingCount > maxFill)
-        {
-            Logger.WarnMarkUp($"[darkorange3_1]Detected {missingCount} missing segment(s) in predictable URL pattern ({FormatMissingSegmentRanges(missingRanges)}), which exceeds max fill limit ({maxFill}). Skipping fill.[/]");
-            shouldFill = false;
-        }
 
         var result = new List<MediaSegment>(segments.Count + (shouldFill ? (int)missingCount : 0));
         long prevNumber = previousNumber;
@@ -2369,11 +2813,6 @@ internal class SimpleLiveRecordManager2
         return path[..(lastSlash + 1)] + newFileNameNoExt + urlParts.Extension + urlParts.Query;
     }
 
-    private static long GetDefaultLiveFillSegmentsGapMax(int waitTime)
-    {
-        return Math.Max(1L, Math.Min(60L, (long)Math.Ceiling(60D / waitTime)));
-    }
-
     private void ResolveLiveRefreshInterval()
     {
         if (WAIT_SEC != 0)
@@ -2399,7 +2838,6 @@ internal class SimpleLiveRecordManager2
 
         if (WAIT_SEC <= 0) WAIT_SEC = 1;
         Logger.WarnMarkUp($"set refresh interval to {WAIT_SEC} seconds{(WAIT_FROM_TARGET_DURATION ? " (based on #EXT-X-TARGETDURATION)" : "")}");
-        DownloaderConfig.MyOptions.LiveFillSegmentsGapMax ??= GetDefaultLiveFillSegmentsGapMax(WAIT_SEC);
     }
 
     private void DisableAudioBasedVttFixWithoutAudioStream()
@@ -2475,6 +2913,11 @@ internal class SimpleLiveRecordManager2
                 RefreshedDurDic[task.Id] = 0;
                 SegmentUrlPatternDic[task.Id] = CheckSegmentUrlPattern(item.Playlist?.MediaParts[0].MediaSegments ?? []);
                 MaxIndexDic[task.Id] = item.Playlist?.MediaParts[0].MediaSegments.LastOrDefault()?.Index ?? 0L; // 最大Index
+                // P0-1/P0-3/P2-1/P2-2：补洞相关状态初始化。HighestEnqueuedNumber 以初始 playlist 末片号为基线。
+                HighestEnqueuedNumberDic[task.Id] = GetInitialHighestEnqueuedNumber(item);
+                PendingGapNumbersDic[task.Id] = new SortedDictionary<long, PendingGapEntry>();
+                LastMergedNumberDic[task.Id] = 0L;
+                GapStatsDic[task.Id] = new LiveGapStats();
                 BlockDic[task.Id] = new BufferBlock<List<MediaSegment>>();
                 dic[item] = task;
             }

@@ -6,7 +6,12 @@ namespace N_m3u8DL_RE.Common.Util;
 
 public static class RetryUtil
 {
-    public static async Task<T?> WebRequestRetryAsync<T>(Func<Task<T>> funcAsync, int maxRetries = 10, int retryDelayMilliseconds = 1500, int retryDelayIncrementMilliseconds = 0)
+    public static async Task<T?> WebRequestRetryAsync<T>(
+        Func<Task<T>> funcAsync,
+        int maxRetries = 10,
+        int retryDelayMilliseconds = 1500,
+        int retryDelayIncrementMilliseconds = 0,
+        CancellationToken cancellationToken = default)
     {
         var retryCount = 0;
         var result = default(T);
@@ -16,15 +21,20 @@ public static class RetryUtil
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 result = await funcAsync();
                 break;
             }
-            catch (Exception ex) when (ex is WebException or IOException or HttpRequestException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (IsTransientWebRequestException(ex))
             {
                 currentException = ex;
                 retryCount++;
                 Logger.WarnMarkUp($"[grey]{ex.Message.EscapeMarkup()} ({retryCount}/{maxRetries})[/]");
-                await Task.Delay(retryDelayMilliseconds + (retryDelayIncrementMilliseconds * (retryCount - 1)));
+                await Task.Delay(retryDelayMilliseconds + (retryDelayIncrementMilliseconds * (retryCount - 1)), cancellationToken);
             }
         }
 
@@ -34,5 +44,10 @@ public static class RetryUtil
         }
 
         return result;
+    }
+
+    private static bool IsTransientWebRequestException(Exception ex)
+    {
+        return ex is WebException or IOException or HttpRequestException or OperationCanceledException;
     }
 }

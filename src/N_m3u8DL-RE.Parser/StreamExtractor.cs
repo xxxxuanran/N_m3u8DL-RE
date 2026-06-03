@@ -139,21 +139,24 @@ public class StreamExtractor
         }
     }
 
-    public async Task RefreshPlayListAsync(List<StreamSpec> streamSpecs)
+    public async Task RefreshPlayListAsync(List<StreamSpec> streamSpecs, CancellationToken cancellationToken = default)
     {
+        var semaphoreEntered = false;
         try
         {
-            await semaphore.WaitAsync();
+            await semaphore.WaitAsync(cancellationToken);
+            semaphoreEntered = true;
             await RetryUtil.WebRequestRetryAsync(async () =>
             {
-                await extractor.RefreshPlayListAsync(streamSpecs);
+                await extractor.RefreshPlayListAsync(streamSpecs, cancellationToken);
                 UpdateRawFilesFromExtractor();
                 return true;
-            }, retryDelayMilliseconds: 1000, maxRetries: 5);
+            }, retryDelayMilliseconds: 1000, maxRetries: 5, cancellationToken: cancellationToken);
         }
         finally
         {
-            semaphore.Release();
+            if (semaphoreEntered)
+                semaphore.Release();
         }
     }
 
