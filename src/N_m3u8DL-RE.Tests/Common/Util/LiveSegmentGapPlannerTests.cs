@@ -117,21 +117,21 @@ public class LiveSegmentGapPlannerTests
     }
 
     [Theory]
-    // TD=1：下限=Max(30, ceil(30/1))=30，上限=Max(1800, ceil(1800/1))=1800。
+    // TD=1：下限=Max(30, ceil(30/1))=30，上限=Max(3600, ceil(3600/1))=3600。
     [InlineData(1, 1.0, 3, 30)]       // 基准3 被下限抬到30
     [InlineData(10, 1.0, 3, 30)]      // 基准30 在[30,1800]内
     [InlineData(22, 1.0, 3, 66)]      // 基准66 在[30,1800]内
     [InlineData(23, 1.0, 3, 69)]      // 本次事故缺口 -> 69（不变）
     [InlineData(100, 1.0, 3, 300)]    // 基准300 在[30,1800]内
-    [InlineData(1000, 1.0, 3, 1800)]  // 基准3000 被上限压到1800
+    [InlineData(1000, 1.0, 3, 3000)]  // 基准3000 在[30,3600]内
     [InlineData(10, 1.0, 5, 50)]      // 基准随 --download-retry-count 变化
     [InlineData(10, 1.0, 0, 30)]      // retry=0 时仍保留下限窗口
-    // TD=4：下限=Max(30, ceil(30/4))=30，上限=1800。
+    // TD=4：下限=Max(30, ceil(30/4))=30，上限=3600。
     [InlineData(1, 4.0, 3, 30)]
     [InlineData(10, 4.0, 3, 30)]
-    // TD=0.5：下限=60，上限=3600。
+    // TD=0.5：下限=60，上限=7200。
     [InlineData(10, 0.5, 3, 60)]
-    [InlineData(2000, 0.5, 3, 3600)]
+    [InlineData(2000, 0.5, 3, 6000)]
     public void ComputeGapWindow_ClampsRetryScaledBaseBetweenFloorAndCap(long count, double targetDuration, int retryCount, long expected)
     {
         LiveSegmentGapPlanner.ComputeGapWindow(count, targetDuration, retryCount).ShouldBe(expected);

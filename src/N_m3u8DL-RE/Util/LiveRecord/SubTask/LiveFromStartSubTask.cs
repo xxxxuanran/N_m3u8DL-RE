@@ -110,15 +110,16 @@ internal sealed class LiveFromStartSubTask(
                 HostMirrors: subTaskHostMirrors);
 
             var downloadCache = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
+            var liveSegmentTimeoutSec = ResolveLiveFromStartSegmentTimeoutSec(subTaskParallelism, ctx.SegmentDuration);
 
             Logger.InfoMarkUp($"[darkorange3_1]Live from start: locating earliest available segment before {firstNumber} for {streamLabel}.[/]");
 
-            var (earliestNumber, _, useDescending) = await LocateEarliestAvailableNumberAsync(ctx, firstNumber, 0, subTaskParallelism, downloadCache, backfillCts.Token);
+            var (earliestNumber, _, useDescending) = await LocateEarliestAvailableNumberAsync(ctx, firstNumber, 0, subTaskParallelism, downloadCache, backfillCts.Token, liveSegmentTimeoutSec);
             var upper = firstNumber - 1;
 
             if (useDescending)
             {
-                await BackfillDescendingAsync(ctx, task, streamLabel, upper, 0, subTaskParallelism, request.FileDic, downloadCache, backfillCts);
+                await BackfillDescendingAsync(ctx, task, streamLabel, upper, 0, subTaskParallelism, request.FileDic, downloadCache, backfillCts, liveSegmentTimeoutSec);
                 return;
             }
 
@@ -151,7 +152,10 @@ internal sealed class LiveFromStartSubTask(
                         resolved[number] = (cached.Segment, cached.Result);
                     else
                     {
-                        inFlight[number] = subTaskDownloader.DownloadAsync(ctx, number, backfillCts.Token);
+                        inFlight[number] = RunWithLiveSegmentTimeoutAsync(
+                            token => subTaskDownloader.DownloadAsync(ctx, number, token),
+                            backfillCts.Token,
+                            liveSegmentTimeoutSec);
                         dispatchCount++;
                     }
                     nextDispatch++;
@@ -296,7 +300,8 @@ internal sealed class LiveFromStartSubTask(
         int parallelism,
         ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
         Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
-        CancellationTokenSource backfillCts)
+        CancellationTokenSource backfillCts,
+        double segmentTimeoutSec)
     {
         var downloadedSegments = new List<MediaSegment>();
         var discardedCleanupCount = 0;
@@ -311,6 +316,7 @@ internal sealed class LiveFromStartSubTask(
             downloadCache,
             backfillCts.Token,
             cacheCompletedDownloads: false,
+            segmentTimeoutSec: segmentTimeoutSec,
             onCommitSuccess: (_, segment, result, _) =>
             {
                 fileDic[segment] = result;
@@ -376,6 +382,7 @@ internal sealed class LiveFromStartSubTask(
         Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
         CancellationToken cancellationToken,
         bool cacheCompletedDownloads,
+        double segmentTimeoutSec,
         Action<long, MediaSegment, DownloadResult, bool>? onCommitSuccess = null)
     {
         var nextDispatch = upper;
@@ -401,7 +408,10 @@ internal sealed class LiveFromStartSubTask(
                 }
                 else
                 {
-                    inFlight[number] = subTaskDownloader.DownloadRequiredAsync(ctx, number, cancellationToken);
+                    inFlight[number] = RunWithLiveSegmentTimeoutAsync(
+                        token => subTaskDownloader.DownloadRequiredAsync(ctx, number, token),
+                        cancellationToken,
+                        segmentTimeoutSec);
                     dispatchCount++;
                 }
                 nextDispatch--;
@@ -463,7 +473,8 @@ internal sealed class LiveFromStartSubTask(
         long floor,
         int parallelism,
         Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        double segmentTimeoutSec)
     {
         var probeCount = 0;
         string? lastRequestUrl = null;
@@ -504,6 +515,7 @@ internal sealed class LiveFromStartSubTask(
                 cache,
                 finishCts.Token,
                 cacheCompletedDownloads: true,
+                segmentTimeoutSec: segmentTimeoutSec,
                 onCommitSuccess: (_, _, result, reused) =>
                 {
                     if (!reused && !string.IsNullOrWhiteSpace(result.RequestUrl))
@@ -639,13 +651,56 @@ internal sealed class LiveFromStartSubTask(
 
         var path = subTaskDownloader.GetSegmentPath(ctx, candidate);
 
-        var probeTimeoutSec = Math.Clamp(getWaitSec() * 2, 2, 5);
+        var probeTimeoutSec = ResolveProbeTimeoutSec();
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(probeTimeoutSec));
         var (_, result) = await subTaskDownloader.DownloadRawAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, timeoutCts.Token, ctx.RetryCount, ctx.HostMirrors);
         var entry = ((MediaSegment?)candidate, result);
         cache[number] = entry;
         return entry;
+    }
+
+    /// <summary>套用 live-from-start 的单片超时执行下载任务。</summary>
+    private static async Task<T> RunWithLiveSegmentTimeoutAsync<T>(
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken,
+        double timeoutSec)
+    {
+        using var timeoutCts = CreateTimeoutTokenSource(cancellationToken, timeoutSec);
+        return await action(timeoutCts.Token);
+    }
+
+    /// <summary>探测超时仍保留短 deadline，但尊重全局 HTTP 超时作为硬上限。</summary>
+    private double ResolveProbeTimeoutSec()
+    {
+        return LiveFromStartPlanner.ResolveProbeTimeoutSec(getWaitSec(), ResolveHttpRequestTimeoutSec());
+    }
+
+    /// <summary>live-from-start 历史分片下载超时：targetDuration * 并发 * 2，并限制在 [probeTimeout, --http-request-timeout] 内。</summary>
+    private double ResolveLiveFromStartSegmentTimeoutSec(int parallelism, double targetDurationSeconds)
+    {
+        var td = double.IsFinite(targetDurationSeconds) && targetDurationSeconds > 0 ? targetDurationSeconds : 1d;
+        var probeTimeoutSec = ResolveProbeTimeoutSec();
+        var httpTimeoutSec = ResolveHttpRequestTimeoutSec();
+        return LiveFromStartPlanner.ResolveSegmentTimeoutSec(parallelism, td, probeTimeoutSec, httpTimeoutSec);
+    }
+
+    /// <summary>读取全局 HTTP 超时；Program 会把 --http-request-timeout 写入 HTTPUtil.AppHttpClient.Timeout。</summary>
+    private static double ResolveHttpRequestTimeoutSec()
+    {
+        var timeout = HTTPUtil.AppHttpClient.Timeout;
+        if (timeout == Timeout.InfiniteTimeSpan)
+            return double.PositiveInfinity;
+
+        return timeout.TotalSeconds > 0 ? timeout.TotalSeconds : 100d;
+    }
+
+    private static CancellationTokenSource CreateTimeoutTokenSource(CancellationToken cancellationToken, double timeoutSec)
+    {
+        var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (double.IsFinite(timeoutSec) && timeoutSec > 0)
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+        return timeoutCts;
     }
 
     /// <summary>把请求 URL 解析为 Uri 以便提取命中的主机名（用于日志展示在哪个镜像上探测成功）；非 http 或无效返回 null。</summary>
