@@ -900,7 +900,7 @@ internal class SimpleLiveRecordManager2
             if (ShouldDelayRealTimeMergeForLiveFromStart(fileOutputStream, liveFromStartMergeReady))
             {
                 if (LiveFromStartMergeDelayLoggedDic.TryAdd(task.Id, true))
-                    Logger.InfoMarkUp($"[darkorange3_1]Live from start is downloading earlier segments for {streamSpec.ToShortShortString().EscapeMarkup()}; delaying real-time merge output only.[/]");
+                    Logger.InfoMarkUp($"[darkorange3_1]{ResString.GetText("liveFromStartMergeDelayed")}[/]", streamSpec.ToShortShortString().EscapeMarkup());
                 continue;
             }
 
@@ -1433,7 +1433,7 @@ internal class SimpleLiveRecordManager2
 
         if (firstFilled != null && lastFilled != null)
         {
-            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: detected {missingCount} missing segment(s) in predictable URL pattern ({FormatMissingSegmentRanges(missingRanges)}), filling.[/]");
+            Logger.WarnMarkUp($"[darkorange3_1]{ResString.GetText("liveFillGapDetectedFilling")}[/]", missingCount, FormatMissingSegmentRanges(missingRanges));
         }
 
         return result;

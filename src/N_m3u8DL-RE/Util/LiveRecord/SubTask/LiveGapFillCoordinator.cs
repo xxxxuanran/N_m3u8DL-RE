@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Log;
+using N_m3u8DL_RE.Common.Resource;
 using N_m3u8DL_RE.Common.Util;
 using N_m3u8DL_RE.Entity;
 using Spectre.Console;
@@ -36,6 +37,8 @@ internal sealed class LiveGapFillCoordinator(
     private readonly ConcurrentDictionary<int, (long BlockNumber, DateTime Since)> mergeHoldDic = new();
     private readonly ConcurrentDictionary<int, LiveGapStats> gapStatsDic = new();
     private readonly ConcurrentDictionary<int, LiveGapFillBatchTracker> gapBatchTrackers = new();
+
+    private static string LiveMarkUp(string key) => $"[darkorange3_1]{ResString.GetText(key)}[/]";
 
     /// <summary>待补缺口的单项状态：已尝试次数（用于有界重试驱逐）、滑动窗口大小、是否已计入进度总量。</summary>
     private sealed class PendingGapEntry
@@ -172,7 +175,7 @@ internal sealed class LiveGapFillCoordinator(
                 LiveSegmentGapPlanner.ComputeGapWindow(range.Count, gapWindowTd, gapWindowRetryCount),
                 countedInPlaylist: false,
                 targetDurationSeconds: gapWindowTd);
-            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: detected {range.Count} missing segment(s) in predictable URL pattern ({range.Start} ~ {range.End}); deferred to subTask fill queue.[/]");
+            Logger.WarnMarkUp(LiveMarkUp("liveFillGapDetected"), range.Count, $"{range.Start.ToString(CultureInfo.InvariantCulture)} ~ {range.End.ToString(CultureInfo.InvariantCulture)}");
         }
 
         var result = new List<MediaSegment>(plan.FreshNumbers.Count);
@@ -348,7 +351,7 @@ internal sealed class LiveGapFillCoordinator(
             }
             RecordLostGap(taskId, block);
             mergeHoldDic.TryRemove(taskId, out _);
-            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: real-time merge skipped unfilled gap at segment {block} after grace period; marking it lost to avoid stalling live output.[/]");
+            Logger.WarnMarkUp(LiveMarkUp("liveFillGapMergeSkipped"), block);
         }
     }
 
@@ -366,27 +369,27 @@ internal sealed class LiveGapFillCoordinator(
                 .Concat(stats.Lost.Select(n => new SegmentNumberRange(n, n)))
                 .ToList();
             lostCount = compactRanges.Sum(r => r.Count);
-            lostRanges = compactRanges.Count > 0 ? FormatSegmentNumberRanges(compactRanges) : "none";
+            lostRanges = compactRanges.Count > 0 ? FormatSegmentNumberRanges(compactRanges) : ResString.GetText("liveLogNone");
         }
 
         long pendingCount = 0;
-        string pendingRanges = "none";
+        string pendingRanges = ResString.GetText("liveLogNone");
         if (pendingGapNumbersDic.TryGetValue(taskId, out var pending))
         {
             lock (pending)
             {
                 pendingCount = pending.Count;
-                pendingRanges = pending.Count > 0 ? FormatContiguousIndexRanges(pending.Keys.ToList()) : "none";
+                pendingRanges = pending.Count > 0 ? FormatContiguousIndexRanges(pending.Keys.ToList()) : ResString.GetText("liveLogNone");
             }
         }
 
         if (stats.Filled == 0 && stats.Deferred == 0 && lostCount == 0)
             return;
 
-        Logger.InfoMarkUp($"[darkorange3_1]Live fill gap summary for {streamLabel}: filled={stats.Filled}, deferred={stats.Deferred}, lost={lostCount} ({lostRanges}), still_pending={pendingCount} ({pendingRanges}).[/]");
+        Logger.InfoMarkUp(LiveMarkUp("liveFillGapSummary"), streamLabel, stats.Filled, stats.Deferred, lostCount, lostRanges, pendingCount, pendingRanges);
         if (lostCount > 0)
         {
-            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: {lostCount} segment(s) ultimately lost for {streamLabel}: {lostRanges}.[/]");
+            Logger.WarnMarkUp(LiveMarkUp("liveFillGapUltimatelyLost"), lostCount, streamLabel, lostRanges);
         }
     }
 
@@ -459,7 +462,13 @@ internal sealed class LiveGapFillCoordinator(
         if (omittedRange != null)
         {
             RecordLostGapRange(taskId, omittedRange.Value.Start, omittedRange.Value.End);
-            Logger.WarnMarkUp($"[darkorange3_1]Live fill gap: large predictable URL gap {range.Start} ~ {range.End} has {range.Count} missing segment(s); capped pending expansion to latest {expandRange.Count} segment(s) ({expandRange.Start} ~ {expandRange.End}) by EXT-X-TARGETDURATION={targetDurationSeconds.ToString("0.###", CultureInfo.InvariantCulture)}s.[/]");
+            Logger.WarnMarkUp(
+                LiveMarkUp("liveFillGapLargeCapped"),
+                $"{range.Start.ToString(CultureInfo.InvariantCulture)} ~ {range.End.ToString(CultureInfo.InvariantCulture)}",
+                range.Count,
+                expandRange.Count,
+                $"{expandRange.Start.ToString(CultureInfo.InvariantCulture)} ~ {expandRange.End.ToString(CultureInfo.InvariantCulture)}",
+                targetDurationSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
         EnqueuePendingGaps(taskId, RangeInclusive(expandRange.Start, expandRange.End), window, countedInPlaylist);
@@ -498,19 +507,19 @@ internal sealed class LiveGapFillCoordinator(
         foreach (var batch in completedBatches)
         {
             var range = FormatSegmentNumberRanges([new SegmentNumberRange(batch.Start, batch.End)]);
-            Logger.InfoMarkUp($"[darkorange3_1]Live fill gap batch summary for {streamLabel}: filled={batch.Count}, lost=0, range={range}, still_pending={pendingCount} ({pendingRanges}).[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFillGapBatchSummary"), streamLabel, batch.Count, range, pendingCount, pendingRanges);
         }
     }
 
     private (long Count, string Ranges) GetPendingGapSnapshot(int taskId)
     {
         if (!pendingGapNumbersDic.TryGetValue(taskId, out var pending))
-            return (0, "none");
+            return (0, ResString.GetText("liveLogNone"));
 
         lock (pending)
         {
             return pending.Count == 0
-                ? (0, "none")
+                ? (0, ResString.GetText("liveLogNone"))
                 : (pending.Count, FormatContiguousIndexRanges(pending.Keys.ToList()));
         }
     }
@@ -599,7 +608,7 @@ internal sealed class LiveGapFillCoordinator(
             .ThenBy(r => r.End)
             .ToList();
         if (ordered.Count == 0)
-            return "none";
+            return ResString.GetText("liveLogNone");
 
         var merged = new List<SegmentNumberRange>();
         var current = ordered[0];
@@ -626,7 +635,7 @@ internal sealed class LiveGapFillCoordinator(
     private static string FormatContiguousIndexRanges(IReadOnlyList<long> sortedIndices)
     {
         if (sortedIndices.Count == 0)
-            return "none";
+            return ResString.GetText("liveLogNone");
 
         var ranges = new List<SegmentNumberRange>();
         var start = sortedIndices[0];

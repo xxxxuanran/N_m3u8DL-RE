@@ -155,7 +155,7 @@ public static class ResString
     public static string newVersionFound => GetText("newVersionFound");
     public static string processImageSub => GetText("processImageSub");
 
-    private static string GetText(string key)
+    public static string GetText(string key)
     {
         if (!StaticText.LANG_DIC.TryGetValue(key, out var textObj))
             return "<...LANG TEXT MISSING...>";

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Log;
+using N_m3u8DL_RE.Common.Resource;
 using N_m3u8DL_RE.Common.Util;
 using N_m3u8DL_RE.Entity;
 using N_m3u8DL_RE.Util;
@@ -79,6 +80,93 @@ internal sealed class LiveFromStartSubTask(
         int DispatchCount,
         int ReusedFromCache);
 
+    private enum LiveFromStartStopReason
+    {
+        RangeCompleted,
+        RecordingStopping,
+        Cancelled,
+        NoPendingWork,
+        LoopExited,
+        BoundaryFound,
+        FloorReached
+    }
+
+    private static string LiveMarkUp(string key) => $"[darkorange3_1]{ResString.GetText(key)}[/]";
+
+    private static string LiveText(string key, params object[] ps)
+    {
+        var text = ResString.GetText(key);
+        foreach (var p in ps)
+        {
+            var index = text.IndexOf("{}", StringComparison.Ordinal);
+            if (index < 0)
+                break;
+
+            var value = p is IFormattable formattable
+                ? formattable.ToString(null, CultureInfo.InvariantCulture)
+                : p?.ToString() ?? string.Empty;
+            text = text[..index] + value + text[(index + 2)..];
+        }
+
+        return text;
+    }
+
+    private static string FormatStopReason(LiveFromStartStopReason reason)
+    {
+        var key = reason switch
+        {
+            LiveFromStartStopReason.RangeCompleted => "liveLogStopRangeCompleted",
+            LiveFromStartStopReason.RecordingStopping => "liveLogStopRecordingStopping",
+            LiveFromStartStopReason.Cancelled => "liveLogStopCancelled",
+            LiveFromStartStopReason.NoPendingWork => "liveLogStopNoPendingWork",
+            LiveFromStartStopReason.LoopExited => "liveLogStopLoopExited",
+            LiveFromStartStopReason.BoundaryFound => "liveLogStopBoundaryFound",
+            LiveFromStartStopReason.FloorReached => "liveLogStopFloorReached",
+            _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, null)
+        };
+        return ResString.GetText(key);
+    }
+
+    private LiveFromStartStopReason ResolveAscendingStopReason(long nextCommit, long upper, int inFlightCount, long nextDispatch, CancellationToken cancellationToken)
+    {
+        if (nextCommit > upper)
+            return LiveFromStartStopReason.RangeCompleted;
+        if (isStopping())
+            return LiveFromStartStopReason.RecordingStopping;
+        if (cancellationToken.IsCancellationRequested)
+            return LiveFromStartStopReason.Cancelled;
+        if (inFlightCount == 0 && nextDispatch > upper)
+            return LiveFromStartStopReason.NoPendingWork;
+
+        return LiveFromStartStopReason.LoopExited;
+    }
+
+    private LiveFromStartStopReason ResolveDescendingBackfillStopReason(long? boundary, CancellationToken cancellationToken)
+    {
+        if (boundary != null)
+            return LiveFromStartStopReason.BoundaryFound;
+        if (isStopping())
+            return LiveFromStartStopReason.RecordingStopping;
+        if (cancellationToken.IsCancellationRequested)
+            return LiveFromStartStopReason.Cancelled;
+
+        return LiveFromStartStopReason.FloorReached;
+    }
+
+    private LiveFromStartStopReason ResolveDescendingScanStopReason(long? boundary, long nextCommit, long floor, CancellationToken cancellationToken)
+    {
+        if (boundary != null)
+            return LiveFromStartStopReason.BoundaryFound;
+        if (isStopping())
+            return LiveFromStartStopReason.RecordingStopping;
+        if (cancellationToken.IsCancellationRequested)
+            return LiveFromStartStopReason.Cancelled;
+        if (nextCommit < floor)
+            return LiveFromStartStopReason.FloorReached;
+
+        return LiveFromStartStopReason.LoopExited;
+    }
+
     /// <summary>
     /// 历史回填主入口：校验 URL 可预测后，先定位最早可用号，再据探测结论选择升序或降序策略并发回填，
     /// 按号顺序提交成功分片、清理未采用的下载，并对不可补齐的空洞整体放弃其下方碎片，最后输出汇总。整段异常均被吞掉以不影响主录制。
@@ -89,22 +177,28 @@ internal sealed class LiveFromStartSubTask(
         try
         {
             var streamSpec = request.StreamSpec;
+            var streamLabel = streamSpec.ToShortShortString().EscapeMarkup();
             var task = request.Task;
             var segments = streamSpec.Playlist?.MediaParts[0].MediaSegments.ToList();
             if (segments == null || segments.Count == 0)
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartSkippedNoTemplate"), streamLabel);
                 return;
+            }
 
-            var streamLabel = streamSpec.ToShortShortString().EscapeMarkup();
             if (!request.PredictableSegmentUrlPattern)
             {
-                Logger.InfoMarkUp($"[darkorange3_1]Live from start skipped for {streamLabel}: segment URL pattern is not predictable.[/]");
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartSkippedUnpredictable"), streamLabel);
                 return;
             }
 
             var firstSegment = segments[0];
             var firstUrlParts = ParseSegmentUrl(firstSegment.Url);
             if (!TryParseSegmentNumber(firstUrlParts.FileNameWithoutExtension, out var firstNumber) || firstNumber <= 0)
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartSkippedInvalidFirstNumber"), streamLabel, firstUrlParts.FileNameWithoutExtension.EscapeMarkup());
                 return;
+            }
 
             var allHasDatetime = segments.All(s => s.DateTime != null);
             var allName = segments.Select(s => OtherUtil.GetFileNameFromInput(s.Url, false)).ToList();
@@ -113,13 +207,23 @@ internal sealed class LiveFromStartSubTask(
                 ? streamSpec.Playlist.TargetDuration.Value
                 : firstSegment.Duration;
             if (backfillSegmentDuration <= 0)
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartDurationFallback"), streamLabel);
                 backfillSegmentDuration = 1;
+            }
 
             var subTaskParallelism = LiveSubTaskSegmentDownloader.ResolveParallelism(request.ThreadCount);
             var subTaskHostMirrors = LiveSubTaskSegmentDownloader.ResolveMirrorHosts(request.LiveHostMirrors);
             var hasMirrors = subTaskHostMirrors.Length > 0;
 
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: host mirrors for racing -> {string.Join(", ", subTaskHostMirrors.Select(m => m.EscapeMarkup()))}.[/]");
+            if (hasMirrors)
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartHostMirrorRace"), streamLabel, string.Join(", ", subTaskHostMirrors.Select(m => m.EscapeMarkup())));
+            }
+            else
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartHostMirrorOriginal"), streamLabel);
+            }
 
             var ctx = new LiveSubTaskDownloadContext(
                 Template: firstSegment,
@@ -137,14 +241,16 @@ internal sealed class LiveFromStartSubTask(
 
             var downloadCache = new ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
             var liveSegmentTimeoutSec = ResolveLiveFromStartSegmentTimeoutSec(subTaskParallelism, ctx.SegmentDuration);
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartTimeoutDecision"), streamLabel, subTaskParallelism, FormatDurationSeconds(ctx.SegmentDuration), FormatDurationSeconds(ResolveProbeTimeoutSec()), FormatDurationSeconds(liveSegmentTimeoutSec));
 
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: locating earliest available segment before {firstNumber} for {streamLabel}.[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocatingEarliest"), firstNumber, streamLabel);
 
             var locateResult = await LocateEarliestAvailableNumberAsync(ctx, firstNumber, 0, subTaskParallelism, downloadCache, backfillCts.Token);
             var upper = firstNumber - 1;
 
             if (locateResult.UseDescending)
             {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartStrategyDescending"), streamLabel, FormatRange(0, upper));
                 await BackfillDescendingAsync(ctx, task, streamLabel, upper, 0, subTaskParallelism, request.FileDic, downloadCache, backfillCts, liveSegmentTimeoutSec);
                 return;
             }
@@ -152,13 +258,17 @@ internal sealed class LiveFromStartSubTask(
             var earliestNumber = locateResult.Earliest;
             if (earliestNumber == null || earliestNumber.Value > upper)
             {
-                Logger.InfoMarkUp($"[darkorange3_1]Live from start: no earlier segment available before {firstNumber} for {streamLabel}.[/]");
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartNoEarlierSegment"), firstNumber, streamLabel);
                 return;
             }
 
             if (locateResult.FuzzyWindowLower is { } fuzzyLower && locateResult.FuzzyWindowUpper is { } fuzzyUpper)
             {
                 var fuzzyPlan = LiveFromStartPlanner.PlanFuzzyBoundary(fuzzyLower, fuzzyUpper);
+                var exploreRange = fuzzyPlan.HasExploreRange
+                    ? FormatRange(fuzzyPlan.ExploreFloor, fuzzyPlan.ExploreUpper)
+                    : ResString.GetText("liveLogNone");
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartStrategyFuzzy"), streamLabel, FormatRange(fuzzyPlan.FillStart, upper), exploreRange);
                 await BackfillFuzzyBoundaryAsync(
                     ctx,
                     task,
@@ -176,11 +286,12 @@ internal sealed class LiveFromStartSubTask(
             }
 
             var boundaryNumber = earliestNumber.Value - 1;
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: earliest available segment is {earliestNumber.Value} for {streamLabel}; backfilling ascending {earliestNumber.Value} ~ {upper}.[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartStrategyAscending"), streamLabel, earliestNumber.Value, FormatRange(earliestNumber.Value, upper));
 
             var ascending = await BackfillAscendingAsync(
                 ctx,
                 task,
+                streamLabel,
                 earliestNumber.Value,
                 upper,
                 subTaskParallelism,
@@ -202,7 +313,7 @@ internal sealed class LiveFromStartSubTask(
         }
         catch (Exception ex)
         {
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start download failed: {ex.Message.EscapeMarkup()}[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartDownloadFailed"), ex.Message.EscapeMarkup());
         }
     }
 
@@ -223,7 +334,10 @@ internal sealed class LiveFromStartSubTask(
         CancellationTokenSource backfillCts,
         double segmentTimeoutSec)
     {
-        Logger.InfoMarkUp($"[darkorange3_1]Live from start: fuzzy boundary window {fuzzyLower} ~ {fillStart} is small enough; backfilling ascending {fillStart} ~ {upper} while exploring descending {fuzzyLower} ~ {fuzzyExploreUpper}.[/]");
+        var exploreRange = fuzzyExploreUpper >= fuzzyLower
+            ? FormatRange(fuzzyLower, fuzzyExploreUpper)
+            : ResString.GetText("liveLogNone");
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyBoundaryDecision"), streamLabel, FormatRange(fuzzyLower, fillStart), FormatRange(fillStart, upper), exploreRange);
 
         FuzzyBoundaryExploreResult? explore = null;
         Task<FuzzyBoundaryExploreResult>? exploreTask = null;
@@ -231,9 +345,11 @@ internal sealed class LiveFromStartSubTask(
 
         if (fuzzyExploreUpper >= fuzzyLower)
         {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyStartExplore"), streamLabel, FormatRange(fuzzyLower, fuzzyExploreUpper));
             exploreTask = Task.Run(
                 () => ExploreFuzzyBoundaryDescendingAsync(
                     ctx,
+                    streamLabel,
                     fuzzyExploreUpper,
                     fuzzyLower,
                     parallelism,
@@ -242,10 +358,15 @@ internal sealed class LiveFromStartSubTask(
                     segmentTimeoutSec),
                 CancellationToken.None);
         }
+        else
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyNoExploreRange"), streamLabel);
+        }
 
         var ascending = await BackfillAscendingAsync(
             ctx,
             task,
+            streamLabel,
             fillStart,
             upper,
             parallelism,
@@ -258,11 +379,13 @@ internal sealed class LiveFromStartSubTask(
         {
             try
             {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyStopExplore"), streamLabel);
                 exploreCts.Cancel();
                 explore = await exploreTask;
             }
-            catch
+            catch (Exception ex)
             {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyIgnoreExploreFailure"), streamLabel, ex.Message.EscapeMarkup());
                 // Fuzzy exploration is best-effort and must not fail the main ascending recovery.
             }
         }
@@ -280,10 +403,13 @@ internal sealed class LiveFromStartSubTask(
             {
                 failedBoundary = boundary;
                 ascending.DiscardedExpiredNumbers.Add(boundary);
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyBoundaryFound"), streamLabel, boundary);
             }
 
             if (fillHasNoUnfillableGap)
             {
+                var adoptedRange = FormatContiguousIndexRanges(explore.ExploredSegments.Select(s => s.Number).OrderBy(n => n).ToList());
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyAdopt"), streamLabel, explore.ExploredSegments.Count, adoptedRange);
                 foreach (var item in explore.ExploredSegments)
                 {
                     fileDic[item.Segment] = item.Result;
@@ -296,12 +422,18 @@ internal sealed class LiveFromStartSubTask(
             }
             else
             {
+                var discardedRange = FormatContiguousIndexRanges(explore.ExploredSegments.Select(s => s.Number).OrderBy(n => n).ToList());
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyDiscard"), streamLabel, ascending.DiscardedExpiredNumbers.Count, explore.ExploredSegments.Count, discardedRange);
                 foreach (var item in explore.ExploredSegments)
                 {
                     if (!item.Reused && TryDeleteDownloadResult(item.Result))
                         extraDiscardedCleanupCount++;
                 }
             }
+        }
+        else
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyNoExploreResult"), streamLabel);
         }
 
         LogAndFinalizeAscendingBackfill(
@@ -322,6 +454,7 @@ internal sealed class LiveFromStartSubTask(
     private async Task<AscendingBackfillResult> BackfillAscendingAsync(
         LiveSubTaskDownloadContext ctx,
         ProgressTask task,
+        string streamLabel,
         long lower,
         long upper,
         int parallelism,
@@ -339,7 +472,10 @@ internal sealed class LiveFromStartSubTask(
         var committed = new HashSet<long>();
         var discardedExpiredNumbers = new List<long>();
         var dispatchCount = 0;
+        var cacheReuseCount = 0;
         var discardedCleanupCount = 0;
+
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartAscendingStart"), streamLabel, FormatRange(lower, upper), parallelism, FormatDurationSeconds(segmentTimeoutSec));
 
         while (!isStopping() && !cancellationToken.IsCancellationRequested && nextCommit <= upper)
         {
@@ -350,6 +486,7 @@ internal sealed class LiveFromStartSubTask(
                 if (downloadCache.TryGetValue(number, out var cached))
                 {
                     resolved[number] = (cached.Segment, cached.Result);
+                    cacheReuseCount++;
                 }
                 else
                 {
@@ -377,6 +514,7 @@ internal sealed class LiveFromStartSubTask(
                 else
                 {
                     discardedExpiredNumbers.Add(nextCommit);
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartAscendingUnavailable"), streamLabel, nextCommit);
                     TryDeleteDownloadResult(done.Result);
                 }
                 nextCommit++;
@@ -398,6 +536,13 @@ internal sealed class LiveFromStartSubTask(
             resolved[finishedNumber] = await finished;
         }
 
+        var stopReason = ResolveAscendingStopReason(nextCommit, upper, inFlight.Count, nextDispatch, cancellationToken);
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartAscendingStop"), streamLabel, FormatStopReason(stopReason), committed.Count, discardedExpiredNumbers.Count, cacheReuseCount, inFlight.Count, resolved.Count);
+
+        if (inFlight.Count > 0 || resolved.Count > 0)
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartAscendingCleanup"), streamLabel, inFlight.Count, resolved.Count);
+        }
         backfillCts.Cancel();
         foreach (var kv in inFlight)
         {
@@ -429,6 +574,7 @@ internal sealed class LiveFromStartSubTask(
     /// <summary>倒序探索混沌小窗口，仅收集可连续接到升序起点前一号的片段；是否接入由主升序结果决定。</summary>
     private async Task<FuzzyBoundaryExploreResult> ExploreFuzzyBoundaryDescendingAsync(
         LiveSubTaskDownloadContext ctx,
+        string streamLabel,
         long upper,
         long floor,
         int parallelism,
@@ -437,6 +583,8 @@ internal sealed class LiveFromStartSubTask(
         double segmentTimeoutSec)
     {
         var explored = new List<NumberedResolved>();
+
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyExploreStart"), streamLabel, FormatRange(floor, upper), parallelism, FormatDurationSeconds(segmentTimeoutSec));
 
         var scan = await RunDescendingMirrorRaceScanAsync(
             ctx,
@@ -472,6 +620,8 @@ internal sealed class LiveFromStartSubTask(
                 discardedCleanupCount++;
         }
 
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyExploreSummary"), streamLabel, explored.Count, scan.Boundary?.ToString(CultureInfo.InvariantCulture) ?? ResString.GetText("liveLogNone"), scan.DispatchCount + scan.ReusedFromCache, discardedCleanupCount);
+
         return new FuzzyBoundaryExploreResult(
             explored,
             scan.Boundary,
@@ -501,9 +651,11 @@ internal sealed class LiveFromStartSubTask(
             downloadedSegments.Select(s => s.Index).ToList(), ascending.DiscardedExpiredNumbers);
         if (abandonCeil is { } highestGap)
         {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartFinalClipGap"), streamLabel, highestGap);
             var fragments = downloadedSegments.Where(s => s.Index <= highestGap).ToList();
             if (fragments.Count > 0)
             {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFinalClipAbandon"), streamLabel, fragments.Count, highestGap);
                 var rolledBackDuration = 0d;
                 foreach (var seg in fragments)
                 {
@@ -525,6 +677,14 @@ internal sealed class LiveFromStartSubTask(
                 abandonedTailCeil = highestGap;
                 downloadedSegments = downloadedSegments.Where(s => s.Index > highestGap).ToList();
             }
+            else
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFinalClipNoFragments"), streamLabel, highestGap);
+            }
+        }
+        else
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartFinalClipNoGap"), streamLabel);
         }
 
         var discardedCleanupCount = ascending.DiscardedCleanupCount + extraDiscardedCleanupCount;
@@ -541,20 +701,24 @@ internal sealed class LiveFromStartSubTask(
         var earliestAvailable = downloadedSegments.Count > 0
             ? FormatSegmentLabel(downloadedSegments[0])
             : initialFloor.ToString(CultureInfo.InvariantCulture);
-        var failedBoundary = boundaryNumber >= 0 ? boundaryNumber.ToString(CultureInfo.InvariantCulture) : "none";
+        var failedBoundary = boundaryNumber >= 0 ? boundaryNumber.ToString(CultureInfo.InvariantCulture) : ResString.GetText("liveLogNone");
         var startedDownloads = downloadCache.Count + ascending.DispatchCount + extraDownloadsStarted;
         var abandonedTailRange = abandonedTailCeil != null
             ? FormatRange(abandonedTailFloor!.Value, abandonedTailCeil.Value)
-            : "none";
-        Logger.InfoMarkUp($"[darkorange3_1]Live from start summary for {streamLabel}: accepted_total={downloadedSegments.Count}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}, boundary_probes={downloadCache.Count}, downloads_started={startedDownloads}, abandoned_tail={abandonedTailRange}, abandoned_fragments={abandonedFragmentCount}, unfillable_gaps={ascending.DiscardedExpiredNumbers.Count}, discarded_cleanup={discardedCleanupCount}.[/]");
+            : ResString.GetText("liveLogNone");
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartSummary"), streamLabel, downloadedSegments.Count, earliestAvailable, failedBoundary, acceptedRange, downloadCache.Count, startedDownloads, abandonedTailRange, abandonedFragmentCount, ascending.DiscardedExpiredNumbers.Count, discardedCleanupCount);
 
         if (downloadedSegments.Count > 0)
         {
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start downloaded {downloadedSegments.Count} contiguous earlier segment(s) for {streamLabel}: {acceptedRange}.[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartDownloaded"), downloadedSegments.Count, streamLabel, acceptedRange);
+        }
+        else
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartNoAcceptedAfterClip"), streamLabel);
         }
         if (abandonedTailCeil != null)
         {
-            Logger.WarnMarkUp($"[darkorange3_1]Live from start: abandoned ragged DVR tail {abandonedTailRange} for {streamLabel} ({abandonedFragmentCount} downloaded fragment(s) discarded, {ascending.DiscardedExpiredNumbers.Count} segment(s) unavailable on selected live-from-start hosts) - cannot connect to live edge across unfillable gap(s).[/]");
+            Logger.WarnMarkUp(LiveMarkUp("liveFromStartAbandonedTail"), abandonedTailRange, streamLabel, abandonedFragmentCount, ascending.DiscardedExpiredNumbers.Count);
         }
     }
 
@@ -577,7 +741,7 @@ internal sealed class LiveFromStartSubTask(
         var downloadedSegments = new List<MediaSegment>();
         var discardedCleanupCount = 0;
 
-        Logger.InfoMarkUp($"[darkorange3_1]Live from start: descending backfill from {upper} downward for {streamLabel} (mirror race, stop at first unavailable).[/]");
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingStart"), streamLabel, FormatRange(floor, upper), parallelism, FormatDurationSeconds(segmentTimeoutSec));
 
         var scan = await RunDescendingMirrorRaceScanAsync(
             ctx,
@@ -597,6 +761,13 @@ internal sealed class LiveFromStartSubTask(
                 addRefreshedDuration(task.Id, segment.Duration);
             });
 
+        var descendingStopReason = ResolveDescendingBackfillStopReason(scan.Boundary, backfillCts.Token);
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingStop"), streamLabel, FormatStopReason(descendingStopReason), scan.Committed.Count, scan.Boundary?.ToString(CultureInfo.InvariantCulture) ?? ResString.GetText("liveLogNone"), scan.InFlight.Count, scan.Resolved.Count);
+
+        if (scan.InFlight.Count > 0 || scan.Resolved.Count > 0 || downloadCache.Count > 0)
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingCleanup"), streamLabel, scan.InFlight.Count, scan.Resolved.Count, downloadCache.Count);
+        }
         backfillCts.Cancel();
         foreach (var kv in scan.InFlight)
         {
@@ -630,14 +801,18 @@ internal sealed class LiveFromStartSubTask(
         var acceptedRange = FormatContiguousIndexRanges(downloadedSegments.Select(s => s.Index).ToList());
         var earliestAvailable = downloadedSegments.Count > 0
             ? FormatSegmentLabel(downloadedSegments[0])
-            : "none";
-        var failedBoundary = scan.Boundary != null ? scan.Boundary.Value.ToString(CultureInfo.InvariantCulture) : "none";
+            : ResString.GetText("liveLogNone");
+        var failedBoundary = scan.Boundary != null ? scan.Boundary.Value.ToString(CultureInfo.InvariantCulture) : ResString.GetText("liveLogNone");
         var startedDownloads = scan.DispatchCount + scan.ReusedFromCache;
-        Logger.InfoMarkUp($"[darkorange3_1]Live from start summary (descending) for {streamLabel}: accepted_total={downloadedSegments.Count}, earliest_available={earliestAvailable}, failed_boundary={failedBoundary}, accepted_range={acceptedRange}, boundary_probes={downloadCache.Count}, downloads_started={startedDownloads}, discarded_cleanup={discardedCleanupCount}.[/]");
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingSummary"), streamLabel, downloadedSegments.Count, earliestAvailable, failedBoundary, acceptedRange, downloadCache.Count, startedDownloads, discardedCleanupCount);
 
         if (downloadedSegments.Count > 0)
         {
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start downloaded {downloadedSegments.Count} contiguous earlier segment(s) for {streamLabel}: {acceptedRange}.[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartDownloaded"), downloadedSegments.Count, streamLabel, acceptedRange);
+        }
+        else
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingNoAccepted"), streamLabel);
         }
     }
 
@@ -699,6 +874,7 @@ internal sealed class LiveFromStartSubTask(
                 else
                 {
                     boundary = nextCommit;
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingScanUnavailable"), nextCommit);
                     TryDeleteDownloadResult(done.Result);
                     stop = true;
                     break;
@@ -723,6 +899,9 @@ internal sealed class LiveFromStartSubTask(
                 downloadCache[finishedNumber] = (finishedResult.Segment, finishedResult.Result);
             resolved[finishedNumber] = new DescendingResolved(finishedResult.Segment, finishedResult.Result, false);
         }
+
+        var scanStopReason = ResolveDescendingScanStopReason(boundary, nextCommit, floor, cancellationToken);
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartDescendingScanSummary"), FormatRange(floor, upper), FormatStopReason(scanStopReason), committed.Count, dispatchCount, reusedFromCache, inFlight.Count, resolved.Count);
 
         return new DescendingScanResult(
             inFlight,
@@ -750,10 +929,12 @@ internal sealed class LiveFromStartSubTask(
         var probeCount = 0;
         string? lastRequestUrl = null;
 
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateStart"), topAvailableSentinel, floor, parallelism);
+
         async Task<DownloadResult?> ProbeAsync(long number, string phase)
         {
             probeCount++;
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start probe #{probeCount} ({phase}): checking segment {number}...[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeChecking"), probeCount, phase, number);
             var (_, result) = await ProbeNumberAsync(ctx, cache, number, cancellationToken);
             if (!string.IsNullOrWhiteSpace(result?.RequestUrl))
                 lastRequestUrl = result.RequestUrl;
@@ -761,13 +942,14 @@ internal sealed class LiveFromStartSubTask(
             if (result is { Success: true })
             {
                 var host = TryParseUrlAuthority(result.RequestUrl)?.Host;
-                Logger.InfoMarkUp(host != null
-                    ? $"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [green]available[/] on [cyan]{host.EscapeMarkup()}[/].[/]"
-                    : $"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [green]available[/].[/]");
+                if (host != null)
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeAvailableOnHost"), probeCount, number, host.EscapeMarkup());
+                else
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeAvailable"), probeCount, number);
             }
             else
             {
-                Logger.InfoMarkUp($"[darkorange3_1]Live from start probe #{probeCount}: segment {number} [red]unavailable[/].[/]");
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeUnavailable"), probeCount, number);
             }
             return result;
         }
@@ -779,12 +961,16 @@ internal sealed class LiveFromStartSubTask(
 
         while (probe >= floor && !isStopping() && !cancellationToken.IsCancellationRequested)
         {
-            var result = await ProbeAsync(probe, $"exponential, depth={topAvailableSentinel - probe}");
+            var result = await ProbeAsync(probe, LiveText("liveFromStartProbePhaseExponential", topAvailableSentinel - probe));
             if (result is { Success: true })
             {
                 lastAvailable = probe;
                 step *= 2;
                 probe -= step;
+                var nextProbe = probe >= floor
+                    ? probe.ToString(CultureInfo.InvariantCulture)
+                    : ResString.GetText("liveLogBelowFloor");
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateExpand"), lastAvailable, step, nextProbe);
             }
             else
             {
@@ -794,63 +980,88 @@ internal sealed class LiveFromStartSubTask(
                 var lastAvailableDepth = topAvailableSentinel - lastAvailable;
                 if (failedDepth == 1)
                 {
-                    Logger.InfoMarkUp($"[darkorange3_1]Live from start: segment {probe} immediately before current playlist is unavailable; no contiguous earlier segment can connect to live edge.[/]");
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartImmediateUnavailable"), probe);
                     return new LocateResult(null, lastRequestUrl, false, null, null);
                 }
 
                 if (lastAvailableDepth <= 60)
                 {
-                    Logger.InfoMarkUp($"[darkorange3_1]Live from start: shallow available region (first failure at depth {failedDepth}, deepest confirmed at depth {lastAvailableDepth}); switching to descending backfill.[/]");
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartShallowAvailable"), failedDepth, lastAvailableDepth);
                     return new LocateResult(null, lastRequestUrl, true, null, null);
                 }
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateFirstUnavailable"), firstUnavailable.Value, firstUnavailable.Value + 1, lastAvailable);
                 break;
             }
         }
 
         if (isStopping() || cancellationToken.IsCancellationRequested)
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateCancelledBeforeWindow"));
             return new LocateResult(null, lastRequestUrl, false, null, null);
+        }
 
         long lo;
         long hi;
         if (firstUnavailable == null)
         {
             if (lastAvailable >= topAvailableSentinel)
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateNoEarlierConfirmed"), topAvailableSentinel);
                 return new LocateResult(null, lastRequestUrl, false, null, null);
+            }
             lo = floor;
             hi = lastAvailable;
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateReachedFloor"), FormatRange(lo, hi));
         }
         else
         {
             if (lastAvailable >= topAvailableSentinel)
+            {
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateUnavailableBeforeAvailable"));
                 return new LocateResult(null, lastRequestUrl, false, null, null);
+            }
             lo = firstUnavailable.Value + 1;
             hi = lastAvailable;
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateBoundedWindow"), FormatRange(lo, hi), firstUnavailable.Value);
         }
 
         var finishWindowSegments = Math.Max(1, (int)Math.Ceiling(40d / ctx.SegmentDuration));
         if (lo < hi)
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: narrowing earliest available within {lo} ~ {hi} (binary search until window <= {finishWindowSegments} segment(s), 40s / targetDuration={ctx.SegmentDuration.ToString("0.###", CultureInfo.InvariantCulture)}).[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateNarrowing"), FormatRange(lo, hi), finishWindowSegments, ctx.SegmentDuration.ToString("0.###", CultureInfo.InvariantCulture));
+        else
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateExactNoBinary"), lo);
 
         while (lo < hi && hi - lo + 1 > finishWindowSegments
                && !isStopping() && !cancellationToken.IsCancellationRequested)
         {
             var mid = lo + (hi - lo) / 2;
-            var result = await ProbeAsync(mid, $"binary, window {lo}~{hi}");
+            var result = await ProbeAsync(mid, LiveText("liveFromStartProbePhaseBinary", lo, hi));
             if (result is { Success: true })
+            {
                 hi = mid;
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateBinaryAvailable"), mid, FormatRange(lo, hi));
+            }
             else
+            {
                 lo = mid + 1;
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateBinaryUnavailable"), mid, FormatRange(lo, hi));
+            }
         }
 
         if (lo < hi && !isStopping() && !cancellationToken.IsCancellationRequested)
         {
-            Logger.InfoMarkUp($"[darkorange3_1]Live from start: boundary window {lo} ~ {hi} is small enough; using fuzzy boundary and starting concurrent ascending fill from {hi}.[/]");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateFuzzyWindow"), FormatRange(lo, hi), hi);
             return new LocateResult(hi, lastRequestUrl, false, lo, hi);
         }
 
-        return isStopping() || cancellationToken.IsCancellationRequested
-            ? new LocateResult(null, lastRequestUrl, false, null, null)
-            : new LocateResult(lo, lastRequestUrl, false, null, null);
+        if (isStopping() || cancellationToken.IsCancellationRequested)
+        {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateCancelledNarrowing"));
+            return new LocateResult(null, lastRequestUrl, false, null, null);
+        }
+
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateExactSelected"), lo);
+        return new LocateResult(lo, lastRequestUrl, false, null, null);
     }
 
     /// <summary>
@@ -864,11 +1075,18 @@ internal sealed class LiveFromStartSubTask(
         CancellationToken cancellationToken)
     {
         if (cache.TryGetValue(number, out var cached))
+        {
+            var cachedAvailability = cached.Result is { Success: true }
+                ? ResString.GetText("liveLogAvailableMarkup")
+                : ResString.GetText("liveLogUnavailableMarkup");
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeCacheReuse"), number, cachedAvailability);
             return cached;
+        }
 
         var candidate = CreateFilledSegment(ctx.Template, ctx.TemplateUrlParts, number, ctx.TemplateNumber, ctx.SegmentDuration);
         if (candidate == null)
         {
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeCannotGenerate"), number);
             var miss = ((MediaSegment?)null, (DownloadResult?)null);
             cache[number] = miss;
             return miss;
@@ -956,6 +1174,18 @@ internal sealed class LiveFromStartSubTask(
         return true;
     }
 
+    /// <summary>为日志格式化秒数；无穷超时显示为 infinite，普通秒数保留最多三位小数。</summary>
+    private static string FormatDurationSeconds(double seconds)
+    {
+        if (double.IsPositiveInfinity(seconds))
+            return ResString.GetText("liveLogInfinite");
+
+        if (!double.IsFinite(seconds))
+            return seconds.ToString(CultureInfo.InvariantCulture);
+
+        return $"{seconds.ToString("0.###", CultureInfo.InvariantCulture)}s";
+    }
+
     /// <summary>为日志格式化分片标签（文件名 + Index），文件名缺失时退回用 Index。</summary>
     private static string FormatSegmentLabel(MediaSegment segment)
     {
@@ -970,7 +1200,7 @@ internal sealed class LiveFromStartSubTask(
     private static string FormatContiguousIndexRanges(IReadOnlyList<long> sortedIndices)
     {
         if (sortedIndices.Count == 0)
-            return "none";
+            return ResString.GetText("liveLogNone");
 
         var parts = new List<string>();
         var start = sortedIndices[0];

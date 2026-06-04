@@ -262,6 +262,534 @@ internal static class StaticText
             zhTW: "錄製直播刷新播放列表出現間隙時，按可預測的連續數字命名規律自動補齊缺失的分片",
             enUS: "Auto-fill missing segments by predictable numeric naming pattern when the live playlist refreshes with gaps"
         ),
+        ["liveLogNone"] = new TextContainer
+        (
+            zhCN: "无",
+            zhTW: "無",
+            enUS: "none"
+        ),
+        ["liveLogInfinite"] = new TextContainer
+        (
+            zhCN: "无限制",
+            zhTW: "無限制",
+            enUS: "infinite"
+        ),
+        ["liveLogBelowFloor"] = new TextContainer
+        (
+            zhCN: "低于下限",
+            zhTW: "低於下限",
+            enUS: "below floor"
+        ),
+        ["liveLogAvailableMarkup"] = new TextContainer
+        (
+            zhCN: "[green]可用[/]",
+            zhTW: "[green]可用[/]",
+            enUS: "[green]available[/]"
+        ),
+        ["liveLogUnavailableMarkup"] = new TextContainer
+        (
+            zhCN: "[red]不可用[/]",
+            zhTW: "[red]不可用[/]",
+            enUS: "[red]unavailable[/]"
+        ),
+        ["liveLogStopRangeCompleted"] = new TextContainer
+        (
+            zhCN: "区间完成",
+            zhTW: "區間完成",
+            enUS: "range completed"
+        ),
+        ["liveLogStopRecordingStopping"] = new TextContainer
+        (
+            zhCN: "录制正在停止",
+            zhTW: "錄製正在停止",
+            enUS: "recording stopping"
+        ),
+        ["liveLogStopCancelled"] = new TextContainer
+        (
+            zhCN: "已取消",
+            zhTW: "已取消",
+            enUS: "cancelled"
+        ),
+        ["liveLogStopNoPendingWork"] = new TextContainer
+        (
+            zhCN: "无待处理任务",
+            zhTW: "無待處理工作",
+            enUS: "no pending work"
+        ),
+        ["liveLogStopLoopExited"] = new TextContainer
+        (
+            zhCN: "循环退出",
+            zhTW: "迴圈退出",
+            enUS: "loop exited"
+        ),
+        ["liveLogStopBoundaryFound"] = new TextContainer
+        (
+            zhCN: "已找到边界",
+            zhTW: "已找到邊界",
+            enUS: "boundary found"
+        ),
+        ["liveLogStopFloorReached"] = new TextContainer
+        (
+            zhCN: "已到达下限",
+            zhTW: "已到達下限",
+            enUS: "floor reached"
+        ),
+        ["liveFromStartMergeDelayed"] = new TextContainer
+        (
+            zhCN: "Live from start 正在为 {} 下载更早的分片；仅延后实时合并输出。",
+            zhTW: "Live from start 正在為 {} 下載更早的分片；僅延後即時合併輸出。",
+            enUS: "Live from start is downloading earlier segments for {}; delaying real-time merge output only."
+        ),
+        ["liveFromStartSkippedNoTemplate"] = new TextContainer
+        (
+            zhCN: "Live from start 已跳过 {}：播放列表没有可作为回填模板的媒体分片。",
+            zhTW: "Live from start 已跳過 {}：播放清單沒有可作為回填範本的媒體分片。",
+            enUS: "Live from start skipped for {}: playlist has no media segment to use as a backfill template."
+        ),
+        ["liveFromStartSkippedUnpredictable"] = new TextContainer
+        (
+            zhCN: "Live from start 已跳过 {}：分片 URL 规律不可预测。",
+            zhTW: "Live from start 已跳過 {}：分片 URL 規律不可預測。",
+            enUS: "Live from start skipped for {}: segment URL pattern is not predictable."
+        ),
+        ["liveFromStartSkippedInvalidFirstNumber"] = new TextContainer
+        (
+            zhCN: "Live from start 已跳过 {}：首个分片文件名 [cyan]{}[/] 不包含有效的正整数序号。",
+            zhTW: "Live from start 已跳過 {}：首個分片檔名 [cyan]{}[/] 不包含有效的正整數序號。",
+            enUS: "Live from start skipped for {}: first segment file name [cyan]{}[/] does not contain a positive numeric sequence."
+        ),
+        ["liveFromStartDurationFallback"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的分片时长不是正数；回填时长回退为 1s。",
+            zhTW: "Live from start：{} 的分片時長不是正數；回填時長退回為 1s。",
+            enUS: "Live from start: segment duration for {} is not positive; using 1s as the backfill duration fallback."
+        ),
+        ["liveFromStartHostMirrorRace"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的镜像决策：竞速镜像 -> {}；单分片重试次数=0。",
+            zhTW: "Live from start：{} 的鏡像決策：競速鏡像 -> {}；單分片重試次數=0。",
+            enUS: "Live from start: host mirror decision for {}: racing mirrors -> {}; single-segment retry_count=0."
+        ),
+        ["liveFromStartHostMirrorOriginal"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的镜像决策：未配置竞速镜像；使用原始分片 URL，单分片重试次数=1。",
+            zhTW: "Live from start：{} 的鏡像決策：未配置競速鏡像；使用原始分片 URL，單分片重試次數=1。",
+            enUS: "Live from start: host mirror decision for {}: no racing mirror configured; using original segment URL with single-segment retry_count=1."
+        ),
+        ["liveFromStartTimeoutDecision"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的超时决策：并发数={}，目标时长={}，探测超时={}，分片超时={}。",
+            zhTW: "Live from start：{} 的逾時決策：並行數={}，目標時長={}，探測逾時={}，分片逾時={}。",
+            enUS: "Live from start: timeout decision for {}: parallelism={}, target_duration={}, probe_timeout={}, segment_timeout={}"
+        ),
+        ["liveFromStartLocatingEarliest"] = new TextContainer
+        (
+            zhCN: "Live from start：正在定位 {} 之前最早可用的分片，流：{}。",
+            zhTW: "Live from start：正在定位 {} 之前最早可用的分片，流：{}。",
+            enUS: "Live from start: locating earliest available segment before {} for {}."
+        ),
+        ["liveFromStartStrategyDescending"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的策略决策：在 {} 上使用降序回填。",
+            zhTW: "Live from start：{} 的策略決策：在 {} 上使用降序回填。",
+            enUS: "Live from start: strategy decision for {}: use descending backfill over {}."
+        ),
+        ["liveFromStartNoEarlierSegment"] = new TextContainer
+        (
+            zhCN: "Live from start：在 {} 之前，{} 没有可用的更早分片。",
+            zhTW: "Live from start：在 {} 之前，{} 沒有可用的更早分片。",
+            enUS: "Live from start: no earlier segment available before {} for {}."
+        ),
+        ["liveFromStartStrategyFuzzy"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的策略决策：使用模糊边界；升序填充={}，降序探索={}。",
+            zhTW: "Live from start：{} 的策略決策：使用模糊邊界；升序填充={}，降序探索={}。",
+            enUS: "Live from start: strategy decision for {}: use fuzzy boundary; ascending_fill={}, descending_explore={}"
+        ),
+        ["liveFromStartStrategyAscending"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的策略决策：最早可用分片为 {}；升序回填 {}。",
+            zhTW: "Live from start：{} 的策略決策：最早可用分片為 {}；升序回填 {}。",
+            enUS: "Live from start: strategy decision for {}: earliest available segment is {}; backfilling ascending {}."
+        ),
+        ["liveFromStartDownloadFailed"] = new TextContainer
+        (
+            zhCN: "Live from start 下载失败：{}",
+            zhTW: "Live from start 下載失敗：{}",
+            enUS: "Live from start download failed: {}"
+        ),
+        ["liveFromStartFuzzyBoundaryDecision"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：窗口={}，升序填充={}，降序探索={}。",
+            zhTW: "Live from start：{} 的模糊邊界決策：視窗={}，升序填充={}，降序探索={}。",
+            enUS: "Live from start: fuzzy boundary decision for {}: window={}, ascending_fill={}, descending_explore={}"
+        ),
+        ["liveFromStartFuzzyStartExplore"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：升序填充运行时，同时启动 {} 的降序探索。",
+            zhTW: "Live from start：{} 的模糊邊界決策：升序填充執行時，同時啟動 {} 的降序探索。",
+            enUS: "Live from start: fuzzy boundary decision for {}: start descending exploration over {} while ascending fill runs."
+        ),
+        ["liveFromStartFuzzyNoExploreRange"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：没有降序探索区间；仅运行升序填充。",
+            zhTW: "Live from start：{} 的模糊邊界決策：沒有降序探索區間；僅執行升序填充。",
+            enUS: "Live from start: fuzzy boundary decision for {}: no descending exploration range; only ascending fill will run."
+        ),
+        ["liveFromStartFuzzyStopExplore"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：升序填充已完成，最终裁剪前停止尽力降序探索。",
+            zhTW: "Live from start：{} 的模糊邊界決策：升序填充已完成，最終裁剪前停止盡力降序探索。",
+            enUS: "Live from start: fuzzy boundary decision for {}: ascending fill finished, stopping best-effort descending exploration before final clipping."
+        ),
+        ["liveFromStartFuzzyIgnoreExploreFailure"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：忽略降序探索失败（{}）；仅用升序填充完成收尾。",
+            zhTW: "Live from start：{} 的模糊邊界決策：忽略降序探索失敗（{}）；僅用升序填充完成收尾。",
+            enUS: "Live from start: fuzzy boundary decision for {}: ignoring descending exploration failure ({}); finalizing ascending fill only."
+        ),
+        ["liveFromStartFuzzyBoundaryFound"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：降序探索在分片 {} 发现不可用边界。",
+            zhTW: "Live from start：{} 的模糊邊界決策：降序探索在分片 {} 發現不可用邊界。",
+            enUS: "Live from start: fuzzy boundary decision for {}: descending exploration found unavailable boundary at segment {}."
+        ),
+        ["liveFromStartFuzzyAdopt"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：升序填充没有不可补空洞；采用 {} 个探索分片，范围={}。",
+            zhTW: "Live from start：{} 的模糊邊界決策：升序填充沒有不可補空洞；採用 {} 個探索分片，範圍={}。",
+            enUS: "Live from start: fuzzy boundary decision for {}: ascending fill has no unfillable gap; adopting {} explored segment(s), range={}"
+        ),
+        ["liveFromStartFuzzyDiscard"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：升序填充有 {} 个不可补空洞；丢弃 {} 个探索分片，范围={}。",
+            zhTW: "Live from start：{} 的模糊邊界決策：升序填充有 {} 個不可補空洞；丟棄 {} 個探索分片，範圍={}。",
+            enUS: "Live from start: fuzzy boundary decision for {}: ascending fill has {} unfillable gap(s); discarding {} explored segment(s), range={}"
+        ),
+        ["liveFromStartFuzzyNoExploreResult"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：没有降序探索结果；仅用升序填充完成收尾。",
+            zhTW: "Live from start：{} 的模糊邊界決策：沒有降序探索結果；僅用升序填充完成收尾。",
+            enUS: "Live from start: fuzzy boundary decision for {}: no descending exploration result; finalizing ascending fill only."
+        ),
+        ["liveFromStartAscendingStart"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的升序回填决策：区间={}，并发数={}，分片超时={}。",
+            zhTW: "Live from start：{} 的升序回填決策：區間={}，並行數={}，分片逾時={}。",
+            enUS: "Live from start: ascending backfill decision for {}: range={}, parallelism={}, segment_timeout={}"
+        ),
+        ["liveFromStartAscendingUnavailable"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的升序回填决策：分片 {} 不可用；标记为不可补历史空洞。",
+            zhTW: "Live from start：{} 的升序回填決策：分片 {} 不可用；標記為不可補歷史空洞。",
+            enUS: "Live from start: ascending backfill decision for {}: segment {} is unavailable; marking it as an unfillable historical gap."
+        ),
+        ["liveFromStartAscendingStop"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的升序回填决策：停止原因={}，已提交={}，不可用={}，复用缓存={}，进行中={}，已解析未提交={}。",
+            zhTW: "Live from start：{} 的升序回填決策：停止原因={}，已提交={}，不可用={}，複用快取={}，進行中={}，已解析未提交={}。",
+            enUS: "Live from start: ascending backfill decision for {}: stop_reason={}, committed={}, unavailable={}, cache_reused={}, in_flight={}, resolved_uncommitted={}"
+        ),
+        ["liveFromStartAscendingCleanup"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的升序回填决策：取消并清理未提交结果（进行中={}，已解析={}）。",
+            zhTW: "Live from start：{} 的升序回填決策：取消並清理未提交結果（進行中={}，已解析={}）。",
+            enUS: "Live from start: ascending backfill decision for {}: cancelling and cleaning uncommitted results (in_flight={}, resolved={})."
+        ),
+        ["liveFromStartFuzzyExploreStart"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界探索决策：降序扫描={}，并发数={}，分片超时={}。",
+            zhTW: "Live from start：{} 的模糊邊界探索決策：降序掃描={}，並行數={}，分片逾時={}。",
+            enUS: "Live from start: fuzzy boundary exploration decision for {}: descending_scan={}, parallelism={}, segment_timeout={}"
+        ),
+        ["liveFromStartFuzzyExploreSummary"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界探索决策：已接受={}，边界={}，已发起下载={}，已清理丢弃={}。",
+            zhTW: "Live from start：{} 的模糊邊界探索決策：已接受={}，邊界={}，已發起下載={}，已清理丟棄={}。",
+            enUS: "Live from start: fuzzy boundary exploration decision for {}: accepted={}, boundary={}, downloads_started={}, discarded_cleanup={}"
+        ),
+        ["liveFromStartFinalClipGap"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的最终裁剪决策：最高不可补历史空洞是分片 {}；检查是否必须放弃已下载尾段。",
+            zhTW: "Live from start：{} 的最終裁剪決策：最高不可補歷史空洞是分片 {}；檢查是否必須放棄已下載尾段。",
+            enUS: "Live from start: final clipping decision for {}: highest unfillable historical gap is segment {}; checking whether downloaded tail must be abandoned."
+        ),
+        ["liveFromStartFinalClipAbandon"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的最终裁剪决策：放弃 {} 个位于 {} 及以下的已下载分片，因为它们无法连接到直播边缘。",
+            zhTW: "Live from start：{} 的最終裁剪決策：放棄 {} 個位於 {} 及以下的已下載分片，因為它們無法連接到直播邊緣。",
+            enUS: "Live from start: final clipping decision for {}: abandoning {} downloaded fragment(s) at or below {} because they cannot connect to the live edge."
+        ),
+        ["liveFromStartFinalClipNoFragments"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的最终裁剪决策：{} 及以下没有已下载分片；无需回滚尾段。",
+            zhTW: "Live from start：{} 的最終裁剪決策：{} 及以下沒有已下載分片；無需回滾尾段。",
+            enUS: "Live from start: final clipping decision for {}: no downloaded fragment is at or below {}; no tail rollback is needed."
+        ),
+        ["liveFromStartFinalClipNoGap"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的最终裁剪决策：没有需要回滚尾段的不可补历史空洞。",
+            zhTW: "Live from start：{} 的最終裁剪決策：沒有需要回滾尾段的不可補歷史空洞。",
+            enUS: "Live from start: final clipping decision for {}: no unfillable historical gap requires tail rollback."
+        ),
+        ["liveFromStartSummary"] = new TextContainer
+        (
+            zhCN: "Live from start 汇总（{}）：已接受总数={}，最早可用={}，失败边界={}，已接受范围={}，边界探测数={}，已发起下载={}，已放弃尾段={}，已放弃分片数={}，不可补空洞数={}，已清理丢弃={}。",
+            zhTW: "Live from start 彙總（{}）：已接受總數={}，最早可用={}，失敗邊界={}，已接受範圍={}，邊界探測數={}，已發起下載={}，已放棄尾段={}，已放棄分片數={}，不可補空洞數={}，已清理丟棄={}。",
+            enUS: "Live from start summary for {}: accepted_total={}, earliest_available={}, failed_boundary={}, accepted_range={}, boundary_probes={}, downloads_started={}, abandoned_tail={}, abandoned_fragments={}, unfillable_gaps={}, discarded_cleanup={}"
+        ),
+        ["liveFromStartDownloaded"] = new TextContainer
+        (
+            zhCN: "Live from start 已下载 {} 个连续的更早分片，流：{}，范围：{}。",
+            zhTW: "Live from start 已下載 {} 個連續的更早分片，流：{}，範圍：{}。",
+            enUS: "Live from start downloaded {} contiguous earlier segment(s) for {}: {}."
+        ),
+        ["liveFromStartNoAcceptedAfterClip"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 最终裁剪后没有接受任何连续的更早分片。",
+            zhTW: "Live from start：{} 最終裁剪後沒有接受任何連續的更早分片。",
+            enUS: "Live from start: no contiguous earlier segment accepted for {} after final clipping."
+        ),
+        ["liveFromStartAbandonedTail"] = new TextContainer
+        (
+            zhCN: "Live from start：已放弃参差 DVR 尾段 {}，流：{}（丢弃 {} 个已下载分片，所选 live-from-start host 上有 {} 个分片不可用）- 无法跨过不可补空洞连接到直播边缘。",
+            zhTW: "Live from start：已放棄參差 DVR 尾段 {}，流：{}（丟棄 {} 個已下載分片，所選 live-from-start host 上有 {} 個分片不可用）- 無法跨過不可補空洞連接到直播邊緣。",
+            enUS: "Live from start: abandoned ragged DVR tail {} for {} ({} downloaded fragment(s) discarded, {} segment(s) unavailable on selected live-from-start hosts) - cannot connect to live edge across unfillable gap(s)."
+        ),
+        ["liveFromStartDescendingStart"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的降序回填决策：区间={}，并发数={}，分片超时={}，遇到首个不可用即停止=true。",
+            zhTW: "Live from start：{} 的降序回填決策：區間={}，並行數={}，分片逾時={}，遇到首個不可用即停止=true。",
+            enUS: "Live from start: descending backfill decision for {}: range={}, parallelism={}, segment_timeout={}, stop_at_first_unavailable=true"
+        ),
+        ["liveFromStartDescendingStop"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的降序回填决策：停止原因={}，已提交={}，边界={}，进行中={}，已解析未提交={}。",
+            zhTW: "Live from start：{} 的降序回填決策：停止原因={}，已提交={}，邊界={}，進行中={}，已解析未提交={}。",
+            enUS: "Live from start: descending backfill decision for {}: stop_reason={}, committed={}, boundary={}, in_flight={}, resolved_uncommitted={}"
+        ),
+        ["liveFromStartDescendingCleanup"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的降序回填决策：取消并清理未提交或缓存结果（进行中={}，已解析={}，缓存={}）。",
+            zhTW: "Live from start：{} 的降序回填決策：取消並清理未提交或快取結果（進行中={}，已解析={}，快取={}）。",
+            enUS: "Live from start: descending backfill decision for {}: cancelling and cleaning uncommitted or cached results (in_flight={}, resolved={}, cache={})."
+        ),
+        ["liveFromStartDescendingNoAccepted"] = new TextContainer
+        (
+            zhCN: "Live from start：降序回填没有为 {} 接受任何更早分片。",
+            zhTW: "Live from start：降序回填沒有為 {} 接受任何更早分片。",
+            enUS: "Live from start: descending backfill accepted no earlier segment for {}."
+        ),
+        ["liveFromStartDescendingScanUnavailable"] = new TextContainer
+        (
+            zhCN: "Live from start：降序扫描决策：分片 {} 不可用；在此边界停止扫描更小序号。",
+            zhTW: "Live from start：降序掃描決策：分片 {} 不可用；在此邊界停止掃描更小序號。",
+            enUS: "Live from start: descending scan decision: segment {} is unavailable; stopping lower-number scan at this boundary."
+        ),
+        ["liveFromStartDescendingScanSummary"] = new TextContainer
+        (
+            zhCN: "Live from start：降序扫描决策：区间={}，停止原因={}，已提交={}，已派发下载={}，复用缓存={}，进行中={}，已解析未提交={}。",
+            zhTW: "Live from start：降序掃描決策：區間={}，停止原因={}，已提交={}，已派發下載={}，複用快取={}，進行中={}，已解析未提交={}。",
+            enUS: "Live from start: descending scan decision: range={}, stop_reason={}, committed={}, downloads_dispatched={}, cache_reused={}, in_flight={}, resolved_uncommitted={}"
+        ),
+        ["liveFromStartDescendingSummary"] = new TextContainer
+        (
+            zhCN: "Live from start 降序汇总（{}）：已接受总数={}，最早可用={}，失败边界={}，已接受范围={}，边界探测数={}，已发起下载={}，已清理丢弃={}。",
+            zhTW: "Live from start 降序彙總（{}）：已接受總數={}，最早可用={}，失敗邊界={}，已接受範圍={}，邊界探測數={}，已發起下載={}，已清理丟棄={}。",
+            enUS: "Live from start summary (descending) for {}: accepted_total={}, earliest_available={}, failed_boundary={}, accepted_range={}, boundary_probes={}, downloads_started={}, discarded_cleanup={}"
+        ),
+        ["liveFromStartLocateStart"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：从 {} 之前开始指数搜索；下限={}，并发数={}。",
+            zhTW: "Live from start：定位決策：從 {} 之前開始指數搜尋；下限={}，並行數={}。",
+            enUS: "Live from start: locate decision: starting exponential search before {}; floor={}, parallelism={}"
+        ),
+        ["liveFromStartProbeChecking"] = new TextContainer
+        (
+            zhCN: "Live from start 探测 #{}（{}）：检查分片 {}...",
+            zhTW: "Live from start 探測 #{}（{}）：檢查分片 {}...",
+            enUS: "Live from start probe #{} ({}): checking segment {}..."
+        ),
+        ["liveFromStartProbeAvailableOnHost"] = new TextContainer
+        (
+            zhCN: "Live from start 探测 #{}：分片 {} [green]可用[/]，命中 [cyan]{}[/]。",
+            zhTW: "Live from start 探測 #{}：分片 {} [green]可用[/]，命中 [cyan]{}[/]。",
+            enUS: "Live from start probe #{}: segment {} [green]available[/] on [cyan]{}[/]."
+        ),
+        ["liveFromStartProbeAvailable"] = new TextContainer
+        (
+            zhCN: "Live from start 探测 #{}：分片 {} [green]可用[/]。",
+            zhTW: "Live from start 探測 #{}：分片 {} [green]可用[/]。",
+            enUS: "Live from start probe #{}: segment {} [green]available[/]."
+        ),
+        ["liveFromStartProbeUnavailable"] = new TextContainer
+        (
+            zhCN: "Live from start 探测 #{}：分片 {} [red]不可用[/]。",
+            zhTW: "Live from start 探測 #{}：分片 {} [red]不可用[/]。",
+            enUS: "Live from start probe #{}: segment {} [red]unavailable[/]."
+        ),
+        ["liveFromStartProbePhaseExponential"] = new TextContainer
+        (
+            zhCN: "指数探测, 深度={}",
+            zhTW: "指數探測, 深度={}",
+            enUS: "exponential, depth={}"
+        ),
+        ["liveFromStartProbePhaseBinary"] = new TextContainer
+        (
+            zhCN: "二分探测, 窗口 {}~{}",
+            zhTW: "二分探測, 窗口 {}~{}",
+            enUS: "binary, window {}~{}"
+        ),
+        ["liveFromStartLocateExpand"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：分片 {} 可用；指数步长扩展到 {}，下次探测={}。",
+            zhTW: "Live from start：定位決策：分片 {} 可用；指數步長擴展到 {}，下次探測={}。",
+            enUS: "Live from start: locate decision: segment {} is available; expanding exponential step to {} and next_probe={}"
+        ),
+        ["liveFromStartImmediateUnavailable"] = new TextContainer
+        (
+            zhCN: "Live from start：当前播放列表之前紧邻的分片 {} 不可用；没有可连接到直播边缘的连续更早分片。",
+            zhTW: "Live from start：目前播放清單之前緊鄰的分片 {} 不可用；沒有可連接到直播邊緣的連續更早分片。",
+            enUS: "Live from start: segment {} immediately before current playlist is unavailable; no contiguous earlier segment can connect to live edge."
+        ),
+        ["liveFromStartShallowAvailable"] = new TextContainer
+        (
+            zhCN: "Live from start：可用区间较浅（首次失败深度 {}，最深确认深度 {}）；切换到降序回填。",
+            zhTW: "Live from start：可用區間較淺（首次失敗深度 {}，最深確認深度 {}）；切換到降序回填。",
+            enUS: "Live from start: shallow available region (first failure at depth {}, deepest confirmed at depth {}); switching to descending backfill."
+        ),
+        ["liveFromStartLocateFirstUnavailable"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：首个不可用分片是 {}；二分搜索将收窄 {} ~ {}。",
+            zhTW: "Live from start：定位決策：首個不可用分片是 {}；二分搜尋將收窄 {} ~ {}。",
+            enUS: "Live from start: locate decision: first unavailable segment is {}; binary search will narrow {} ~ {}."
+        ),
+        ["liveFromStartLocateCancelledBeforeWindow"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：边界窗口选定前搜索已取消。",
+            zhTW: "Live from start：定位決策：邊界窗口選定前搜尋已取消。",
+            enUS: "Live from start: locate decision: search cancelled before boundary window was selected."
+        ),
+        ["liveFromStartLocateNoEarlierConfirmed"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：{} 之前没有确认任何更早可用分片。",
+            zhTW: "Live from start：定位決策：{} 之前沒有確認任何更早可用分片。",
+            enUS: "Live from start: locate decision: no earlier segment was confirmed available before {}."
+        ),
+        ["liveFromStartLocateReachedFloor"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：指数搜索到达下限仍未探到不可用分片；最早候选窗口为 {}。",
+            zhTW: "Live from start：定位決策：指數搜尋到達下限仍未探到不可用分片；最早候選窗口為 {}。",
+            enUS: "Live from start: locate decision: exponential search reached floor without an unavailable probe; earliest candidate window is {}."
+        ),
+        ["liveFromStartLocateUnavailableBeforeAvailable"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：在任何更早可用分片前已经探到不可用分片；无法选择连续的更早分片。",
+            zhTW: "Live from start：定位決策：在任何更早可用分片前已經探到不可用分片；無法選擇連續的更早分片。",
+            enUS: "Live from start: locate decision: unavailable probe was found before any earlier available segment; no contiguous earlier segment can be selected."
+        ),
+        ["liveFromStartLocateBoundedWindow"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：将最早候选窗口限定为 {}，它位于不可用分片 {} 之后。",
+            zhTW: "Live from start：定位決策：將最早候選窗口限定為 {}，它位於不可用分片 {} 之後。",
+            enUS: "Live from start: locate decision: bounded earliest candidate window to {} after unavailable segment {}."
+        ),
+        ["liveFromStartLocateNarrowing"] = new TextContainer
+        (
+            zhCN: "Live from start：正在 {} 内收窄最早可用分片（二分到窗口 <= {} 个分片，40s / 目标时长={}）。",
+            zhTW: "Live from start：正在 {} 內收窄最早可用分片（二分到視窗 <= {} 個分片，40s / 目標時長={}）。",
+            enUS: "Live from start: narrowing earliest available within {} (binary search until window <= {} segment(s), 40s / targetDuration={})."
+        ),
+        ["liveFromStartLocateExactNoBinary"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：最早可用分片已经精确为 {}；无需二分收窄。",
+            zhTW: "Live from start：定位決策：最早可用分片已經精確為 {}；無需二分收窄。",
+            enUS: "Live from start: locate decision: earliest available segment is already exact at {}; no binary narrowing needed."
+        ),
+        ["liveFromStartLocateBinaryAvailable"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：分片 {} 可用；最早候选窗口变为 {}。",
+            zhTW: "Live from start：定位決策：分片 {} 可用；最早候選窗口變為 {}。",
+            enUS: "Live from start: locate decision: segment {} is available; earliest candidate window becomes {}."
+        ),
+        ["liveFromStartLocateBinaryUnavailable"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：分片 {} 不可用；最早候选窗口变为 {}。",
+            zhTW: "Live from start：定位決策：分片 {} 不可用；最早候選窗口變為 {}。",
+            enUS: "Live from start: locate decision: segment {} is unavailable; earliest candidate window becomes {}."
+        ),
+        ["liveFromStartLocateFuzzyWindow"] = new TextContainer
+        (
+            zhCN: "Live from start：边界窗口 {} 已足够小；使用模糊边界，并从 {} 开始并发升序填充。",
+            zhTW: "Live from start：邊界窗口 {} 已足夠小；使用模糊邊界，並從 {} 開始並發升序填充。",
+            enUS: "Live from start: boundary window {} is small enough; using fuzzy boundary and starting concurrent ascending fill from {}."
+        ),
+        ["liveFromStartLocateCancelledNarrowing"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：收窄边界窗口时搜索已取消。",
+            zhTW: "Live from start：定位決策：收窄邊界窗口時搜尋已取消。",
+            enUS: "Live from start: locate decision: search cancelled while narrowing boundary window."
+        ),
+        ["liveFromStartLocateExactSelected"] = new TextContainer
+        (
+            zhCN: "Live from start：定位决策：最终选择的精确最早可用分片为 {}。",
+            zhTW: "Live from start：定位決策：最終選擇的精確最早可用分片為 {}。",
+            enUS: "Live from start: locate decision: exact earliest available segment selected as {}."
+        ),
+        ["liveFromStartProbeCacheReuse"] = new TextContainer
+        (
+            zhCN: "Live from start 探测缓存决策：分片 {} 复用缓存的 {} 结果。",
+            zhTW: "Live from start 探測快取決策：分片 {} 複用快取的 {} 結果。",
+            enUS: "Live from start probe cache decision: segment {} reuses cached {} result."
+        ),
+        ["liveFromStartProbeCannotGenerate"] = new TextContainer
+        (
+            zhCN: "Live from start 探测缓存决策：无法从模板 URL 生成分片 {}；缓存为不可用。",
+            zhTW: "Live from start 探測快取決策：無法從範本 URL 生成分片 {}；快取為不可用。",
+            enUS: "Live from start probe cache decision: segment {} cannot be generated from the template URL; caching it as unavailable."
+        ),
+        ["liveFillGapDetected"] = new TextContainer
+        (
+            zhCN: "Live fill gap：检测到可预测 URL 规律中缺失 {} 个分片（{}）；已延后到子任务补齐队列。",
+            zhTW: "Live fill gap：檢測到可預測 URL 規律中缺失 {} 個分片（{}）；已延後到子任務補齊佇列。",
+            enUS: "Live fill gap: detected {} missing segment(s) in predictable URL pattern ({}); deferred to subTask fill queue."
+        ),
+        ["liveFillGapDetectedFilling"] = new TextContainer
+        (
+            zhCN: "Live fill gap：检测到可预测 URL 规律中缺失 {} 个分片（{}），正在填充。",
+            zhTW: "Live fill gap：檢測到可預測 URL 規律中缺失 {} 個分片（{}），正在填充。",
+            enUS: "Live fill gap: detected {} missing segment(s) in predictable URL pattern ({}), filling."
+        ),
+        ["liveFillGapMergeSkipped"] = new TextContainer
+        (
+            zhCN: "Live fill gap：实时合并宽限期后跳过未补分片 {}；标记为丢失以避免直播输出停滞。",
+            zhTW: "Live fill gap：即時合併寬限期後跳過未補分片 {}；標記為丟失以避免直播輸出停滯。",
+            enUS: "Live fill gap: real-time merge skipped unfilled gap at segment {} after grace period; marking it lost to avoid stalling live output."
+        ),
+        ["liveFillGapSummary"] = new TextContainer
+        (
+            zhCN: "Live fill gap 汇总（{}）：已补齐={}，已延后={}，已丢失={} ({})，仍待处理={} ({})。",
+            zhTW: "Live fill gap 彙總（{}）：已補齊={}，已延後={}，已丟失={} ({})，仍待處理={} ({})。",
+            enUS: "Live fill gap summary for {}: filled={}, deferred={}, lost={} ({}), still_pending={} ({})."
+        ),
+        ["liveFillGapUltimatelyLost"] = new TextContainer
+        (
+            zhCN: "Live fill gap：最终丢失 {} 个分片，流：{}，范围：{}。",
+            zhTW: "Live fill gap：最終丟失 {} 個分片，流：{}，範圍：{}。",
+            enUS: "Live fill gap: {} segment(s) ultimately lost for {}: {}."
+        ),
+        ["liveFillGapLargeCapped"] = new TextContainer
+        (
+            zhCN: "Live fill gap：可预测 URL 大缺口 {} 有 {} 个缺失分片；将待补扩展限制为最新 {} 个分片（{}），依据 EXT-X-TARGETDURATION={}s。",
+            zhTW: "Live fill gap：可預測 URL 大缺口 {} 有 {} 個缺失分片；將待補擴展限制為最新 {} 個分片（{}），依據 EXT-X-TARGETDURATION={}s。",
+            enUS: "Live fill gap: large predictable URL gap {} has {} missing segment(s); capped pending expansion to latest {} segment(s) ({}) by EXT-X-TARGETDURATION={}s."
+        ),
+        ["liveFillGapBatchSummary"] = new TextContainer
+        (
+            zhCN: "Live fill gap 批次汇总（{}）：已补齐={}，已丢失=0，范围={}，仍待处理={} ({})。",
+            zhTW: "Live fill gap 批次彙總（{}）：已補齊={}，已丟失=0，範圍={}，仍待處理={} ({})。",
+            enUS: "Live fill gap batch summary for {}: filled={}, lost=0, range={}, still_pending={} ({})."
+        ),
         ["cmd_liveRestartOnExtMapChange"] = new TextContainer
         (
             zhCN: "录制直播时若检测到EXT-X-MAP变动，自动收尾当前输出并以新的初始化分片重启录制；关闭时将直接停止录制",
