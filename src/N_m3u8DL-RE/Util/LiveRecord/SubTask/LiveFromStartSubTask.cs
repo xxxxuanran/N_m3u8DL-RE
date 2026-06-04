@@ -45,6 +45,12 @@ internal sealed class LiveFromStartSubTask(
     /// <summary>降序竞速中一个号的解析结果：分片、下载结果，及是否来自探测缓存（复用则不重复清理/计数）。</summary>
     private readonly record struct DescendingResolved(MediaSegment? Segment, DownloadResult? Result, bool Reused);
 
+    /// <summary>升序回填中一个号的解析结果：分片、下载结果，以及失败是否由 live-from-start 单片 deadline 触发。</summary>
+    private readonly record struct AscendingResolved(MediaSegment? Segment, DownloadResult? Result, bool TimedOut, DateTimeOffset CompletedAt);
+
+    /// <summary>带 live-from-start 单片 deadline 元数据的异步结果。</summary>
+    private readonly record struct LiveSegmentTimedResult<T>(T Value, bool TimedOut, DateTimeOffset CompletedAt);
+
     /// <summary>已按号确认可用的下载结果；用于模糊边界探索完成后再决定是否接入主连续尾段。</summary>
     private readonly record struct NumberedResolved(long Number, MediaSegment Segment, DownloadResult Result, bool Reused);
 
@@ -342,6 +348,7 @@ internal sealed class LiveFromStartSubTask(
         FuzzyBoundaryExploreResult? explore = null;
         Task<FuzzyBoundaryExploreResult>? exploreTask = null;
         using var exploreCts = CancellationTokenSource.CreateLinkedTokenSource(backfillCts.Token);
+        var exploreCancelledForInitialFastForward = false;
 
         if (fuzzyExploreUpper >= fuzzyLower)
         {
@@ -373,14 +380,26 @@ internal sealed class LiveFromStartSubTask(
             fileDic,
             downloadCache,
             backfillCts,
-            segmentTimeoutSec);
+            segmentTimeoutSec,
+            onInitialTimeoutFastForward: () =>
+            {
+                if (exploreCts.IsCancellationRequested)
+                    return;
+
+                exploreCancelledForInitialFastForward = true;
+                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyStopExploreInitialFastForward"), streamLabel);
+                exploreCts.Cancel();
+            });
 
         if (exploreTask != null)
         {
             try
             {
-                Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyStopExplore"), streamLabel);
-                exploreCts.Cancel();
+                if (!exploreCancelledForInitialFastForward)
+                {
+                    Logger.InfoMarkUp(LiveMarkUp("liveFromStartFuzzyStopExplore"), streamLabel);
+                    exploreCts.Cancel();
+                }
                 explore = await exploreTask;
             }
             catch (Exception ex)
@@ -461,43 +480,60 @@ internal sealed class LiveFromStartSubTask(
         ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
         ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
         CancellationTokenSource backfillCts,
-        double segmentTimeoutSec)
+        double segmentTimeoutSec,
+        Action? onInitialTimeoutFastForward = null)
     {
         var cancellationToken = backfillCts.Token;
         var nextDispatch = lower;
         var nextCommit = lower;
-        var inFlight = new Dictionary<long, Task<(MediaSegment? Segment, DownloadResult? Result)>>();
-        var resolved = new Dictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
+        var inFlight = new Dictionary<long, Task<LiveSegmentTimedResult<(MediaSegment? Segment, DownloadResult? Result)>>>();
+        var resolved = new Dictionary<long, AscendingResolved>();
         var downloadedSegments = new List<MediaSegment>();
         var committed = new HashSet<long>();
         var discardedExpiredNumbers = new List<long>();
         var dispatchCount = 0;
         var cacheReuseCount = 0;
         var discardedCleanupCount = 0;
+        var initialLogicalBatchEnd = LiveFromStartPlanner.ResolveInitialAscendingLogicalBatchEnd(lower, parallelism);
+        var initialActualNumbers = new HashSet<long>();
+        var initialActualResults = new Dictionary<long, AscendingResolved>();
+        long? initialAnchorNumber = null;
+        var initialFastForwardPending = true;
+        var initialFastForwardEvaluated = false;
 
         Logger.InfoMarkUp(LiveMarkUp("liveFromStartAscendingStart"), streamLabel, FormatRange(lower, upper), parallelism, FormatDurationSeconds(segmentTimeoutSec));
 
         while (!isStopping() && !cancellationToken.IsCancellationRequested && nextCommit <= upper)
         {
             while (inFlight.Count < parallelism && nextDispatch <= upper
+                   && !ShouldHoldInitialFastForwardDispatch()
                    && !isStopping() && !cancellationToken.IsCancellationRequested)
             {
                 var number = nextDispatch;
+                var isInitialLogicalSlot = initialFastForwardPending && number <= initialLogicalBatchEnd;
                 if (downloadCache.TryGetValue(number, out var cached))
                 {
-                    resolved[number] = (cached.Segment, cached.Result);
+                    resolved[number] = new AscendingResolved(cached.Segment, cached.Result, TimedOut: false, DateTimeOffset.UtcNow);
                     cacheReuseCount++;
                 }
                 else
                 {
-                    inFlight[number] = RunWithLiveSegmentTimeoutAsync(
+                    inFlight[number] = RunWithLiveSegmentTimeoutStateAsync(
                         token => subTaskDownloader.DownloadAsync(ctx, number, token),
                         cancellationToken,
                         segmentTimeoutSec);
+                    if (isInitialLogicalSlot)
+                    {
+                        initialActualNumbers.Add(number);
+                        initialAnchorNumber ??= number;
+                    }
                     dispatchCount++;
                 }
                 nextDispatch++;
             }
+
+            if (initialFastForwardPending && nextDispatch > initialLogicalBatchEnd && initialActualNumbers.Count == 0)
+                initialFastForwardPending = false;
 
             while (resolved.Remove(nextCommit, out var done))
             {
@@ -520,6 +556,8 @@ internal sealed class LiveFromStartSubTask(
                 nextCommit++;
             }
 
+            TryApplyInitialTimeoutFastForward();
+
             if (nextCommit > upper)
                 break;
 
@@ -533,7 +571,12 @@ internal sealed class LiveFromStartSubTask(
             var finished = await Task.WhenAny(inFlight.Values);
             var finishedNumber = inFlight.First(kv => kv.Value == finished).Key;
             inFlight.Remove(finishedNumber);
-            resolved[finishedNumber] = await finished;
+            var timedResult = await finished;
+            var doneResult = timedResult.Value;
+            var ascendingResolved = new AscendingResolved(doneResult.Segment, doneResult.Result, timedResult.TimedOut, timedResult.CompletedAt);
+            resolved[finishedNumber] = ascendingResolved;
+            if (initialActualNumbers.Contains(finishedNumber))
+                initialActualResults[finishedNumber] = ascendingResolved;
         }
 
         var stopReason = ResolveAscendingStopReason(nextCommit, upper, inFlight.Count, nextDispatch, cancellationToken);
@@ -548,7 +591,7 @@ internal sealed class LiveFromStartSubTask(
         {
             try
             {
-                var done = await kv.Value;
+                var done = (await kv.Value).Value;
                 if (done.Result is { Success: true } && !committed.Contains(kv.Key) && TryDeleteDownloadResult(done.Result))
                     discardedCleanupCount++;
             }
@@ -569,6 +612,99 @@ internal sealed class LiveFromStartSubTask(
             discardedExpiredNumbers,
             dispatchCount,
             discardedCleanupCount);
+
+        bool ShouldHoldInitialFastForwardDispatch()
+        {
+            return initialFastForwardPending && nextDispatch > initialLogicalBatchEnd;
+        }
+
+        void TryApplyInitialTimeoutFastForward()
+        {
+            if (!initialFastForwardPending || initialFastForwardEvaluated || initialAnchorNumber == null
+                || initialActualResults.Count < initialActualNumbers.Count)
+            {
+                return;
+            }
+
+            initialFastForwardPending = false;
+            initialFastForwardEvaluated = true;
+
+            if (!initialActualResults.TryGetValue(initialAnchorNumber.Value, out var anchor)
+                || anchor.Result is { Success: true }
+                || !anchor.TimedOut
+                || anchor.Segment == null)
+            {
+                return;
+            }
+
+            var timeoutSpan = BuildInitialTimeoutSegmentSpan(initialAnchorNumber.Value, anchor.CompletedAt);
+            var timeoutSegments = timeoutSpan.Select(item => item.Segment).ToList();
+            if (!LiveFromStartPlanner.TryResolveInitialTimeoutFastForwardLatestFailure(timeoutSegments, out var latestFailure))
+                return;
+
+            var completionSpan = timeoutSpan.Count > 0
+                ? timeoutSpan.Max(item => item.CompletedAt) - timeoutSpan.Min(item => item.CompletedAt)
+                : TimeSpan.Zero;
+            var step = LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStep(segmentTimeoutSec, ctx.SegmentDuration);
+            var desiredJumpStart = LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStart(latestFailure, step);
+            var upperExclusive = upper == long.MaxValue ? long.MaxValue : upper + 1;
+            var jumpStart = Math.Min(desiredJumpStart, upperExclusive);
+            if (jumpStart <= nextCommit)
+                return;
+
+            var skippedStart = nextCommit;
+            var skippedEnd = jumpStart - 1;
+            for (var number = skippedStart; number <= skippedEnd; number++)
+                discardedExpiredNumbers.Add(number);
+
+            nextCommit = jumpStart;
+            if (nextDispatch < jumpStart)
+                nextDispatch = jumpStart;
+
+            onInitialTimeoutFastForward?.Invoke();
+
+            Logger.InfoMarkUp(
+                LiveMarkUp("liveFromStartAscendingInitialTimeoutFastForward"),
+                streamLabel,
+                FormatRange(timeoutSegments[0].Index, latestFailure),
+                FormatDurationSeconds(segmentTimeoutSec),
+                FormatDurationSeconds(completionSpan.TotalSeconds),
+                FormatDurationSeconds(ctx.SegmentDuration),
+                step,
+                FormatRange(skippedStart, skippedEnd),
+                jumpStart);
+        }
+
+        List<(MediaSegment Segment, DateTimeOffset CompletedAt)> BuildInitialTimeoutSegmentSpan(long anchorNumber, DateTimeOffset anchorCompletedAt)
+        {
+            var selected = new List<(MediaSegment Segment, DateTimeOffset CompletedAt)>();
+            var minCompletedAt = anchorCompletedAt;
+            var maxCompletedAt = anchorCompletedAt;
+
+            for (var number = anchorNumber; number <= upper; number++)
+            {
+                if (!initialActualResults.TryGetValue(number, out var done)
+                    || done.Result is { Success: true }
+                    || !done.TimedOut
+                    || done.Segment == null)
+                {
+                    break;
+                }
+
+                var nextMinCompletedAt = done.CompletedAt < minCompletedAt ? done.CompletedAt : minCompletedAt;
+                var nextMaxCompletedAt = done.CompletedAt > maxCompletedAt ? done.CompletedAt : maxCompletedAt;
+                if (nextMaxCompletedAt - nextMinCompletedAt > LiveFromStartPlanner.InitialTimeoutBatchCompletionWindow)
+                    break;
+
+                selected.Add((done.Segment, done.CompletedAt));
+                minCompletedAt = nextMinCompletedAt;
+                maxCompletedAt = nextMaxCompletedAt;
+                if (number == long.MaxValue)
+                    break;
+            }
+
+            return selected;
+        }
     }
 
     /// <summary>倒序探索混沌小窗口，仅收集可连续接到升序起点前一号的片段；是否接入由主升序结果决定。</summary>
@@ -929,7 +1065,9 @@ internal sealed class LiveFromStartSubTask(
         var probeCount = 0;
         string? lastRequestUrl = null;
 
-        Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateStart"), topAvailableSentinel, floor, parallelism);
+        var probeFloor = LiveFromStartPlanner.ResolveProbeFloor(topAvailableSentinel, floor);
+
+        Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateStart"), topAvailableSentinel, probeFloor, parallelism);
 
         async Task<DownloadResult?> ProbeAsync(long number, string phase)
         {
@@ -959,7 +1097,7 @@ internal sealed class LiveFromStartSubTask(
         long? firstUnavailable = null;
         var probe = topAvailableSentinel - 1;
 
-        while (probe >= floor && !isStopping() && !cancellationToken.IsCancellationRequested)
+        while (probe >= probeFloor && !isStopping() && !cancellationToken.IsCancellationRequested)
         {
             var result = await ProbeAsync(probe, LiveText("liveFromStartProbePhaseExponential", topAvailableSentinel - probe));
             if (result is { Success: true })
@@ -967,7 +1105,7 @@ internal sealed class LiveFromStartSubTask(
                 lastAvailable = probe;
                 step *= 2;
                 probe -= step;
-                var nextProbe = probe >= floor
+                var nextProbe = probe >= probeFloor
                     ? probe.ToString(CultureInfo.InvariantCulture)
                     : ResString.GetText("liveLogBelowFloor");
                 Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateExpand"), lastAvailable, step, nextProbe);
@@ -1009,7 +1147,7 @@ internal sealed class LiveFromStartSubTask(
                 Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateNoEarlierConfirmed"), topAvailableSentinel);
                 return new LocateResult(null, lastRequestUrl, false, null, null);
             }
-            lo = floor;
+            lo = probeFloor;
             hi = lastAvailable;
             Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateReachedFloor"), FormatRange(lo, hi));
         }
@@ -1111,6 +1249,18 @@ internal sealed class LiveFromStartSubTask(
     {
         using var timeoutCts = CreateTimeoutTokenSource(cancellationToken, timeoutSec);
         return await action(timeoutCts.Token);
+    }
+
+    /// <summary>套用 live-from-start 的单片超时，并返回本次失败是否由该 deadline 触发。</summary>
+    private static async Task<LiveSegmentTimedResult<T>> RunWithLiveSegmentTimeoutStateAsync<T>(
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken,
+        double timeoutSec)
+    {
+        using var timeoutCts = CreateTimeoutTokenSource(cancellationToken, timeoutSec);
+        var value = await action(timeoutCts.Token);
+        var timedOut = timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
+        return new LiveSegmentTimedResult<T>(value, timedOut, DateTimeOffset.UtcNow);
     }
 
     /// <summary>探测超时仍保留短 deadline，但尊重全局 HTTP 超时作为硬上限。</summary>

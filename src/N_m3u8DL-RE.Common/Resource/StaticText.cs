@@ -442,6 +442,12 @@ internal static class StaticText
             zhTW: "Live from start：{} 的模糊邊界決策：升序填充已完成，最終裁剪前停止盡力降序探索。",
             enUS: "Live from start: fuzzy boundary decision for {}: ascending fill finished, stopping best-effort descending exploration before final clipping."
         ),
+        ["liveFromStartFuzzyStopExploreInitialFastForward"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的模糊边界决策：升序填充发生首批 timeout 倍进，立即放弃全部降序探索任务。",
+            zhTW: "Live from start：{} 的模糊邊界決策：升序填充發生首批 timeout 倍進，立即放棄全部降序探索任務。",
+            enUS: "Live from start: fuzzy boundary decision for {}: initial timeout fast-forward occurred in ascending fill; abandoning all descending exploration tasks immediately."
+        ),
         ["liveFromStartFuzzyIgnoreExploreFailure"] = new TextContainer
         (
             zhCN: "Live from start：{} 的模糊边界决策：忽略降序探索失败（{}）；仅用升序填充完成收尾。",
@@ -483,6 +489,12 @@ internal static class StaticText
             zhCN: "Live from start：{} 的升序回填决策：分片 {} 不可用；标记为不可补历史空洞。",
             zhTW: "Live from start：{} 的升序回填決策：分片 {} 不可用；標記為不可補歷史空洞。",
             enUS: "Live from start: ascending backfill decision for {}: segment {} is unavailable; marking it as an unfillable historical gap."
+        ),
+        ["liveFromStartAscendingInitialTimeoutFastForward"] = new TextContainer
+        (
+            zhCN: "Live from start：{} 的升序回填决策：首批 {} 全部因 {} 超时结束（完成跨度={}，target_duration={}，倍进步长={}）；跳过 {}，下一次派发从 {} 开始。",
+            zhTW: "Live from start：{} 的升序回填決策：首批 {} 全部因 {} 逾時結束（完成跨度={}，target_duration={}，倍進步長={}）；跳過 {}，下一次派發從 {} 開始。",
+            enUS: "Live from start: ascending backfill decision for {}: initial batch {} all ended by {} timeout (completion_span={}, target_duration={}, fast-forward step={}); skipping {}, next dispatch starts at {}."
         ),
         ["liveFromStartAscendingStop"] = new TextContainer
         (
