@@ -1,3 +1,4 @@
+using System.Net;
 using N_m3u8DL_RE.Common.Util;
 using Shouldly;
 
@@ -39,5 +40,24 @@ public class RetryUtilTests
         }, maxRetries: 2, retryDelayMilliseconds: 1, cancellationToken: cts.Token));
 
         attempts.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task WebRequestRetryAsync_MaxRetries_ExposesAttemptExceptions()
+    {
+        var attempts = 0;
+
+        var exception = await Should.ThrowAsync<WebRequestRetryException>(() => RetryUtil.WebRequestRetryAsync<bool>(async () =>
+        {
+            attempts++;
+            await Task.Yield();
+            throw new HttpRequestException("not found", null, HttpStatusCode.NotFound);
+        }, maxRetries: 2, retryDelayMilliseconds: 1));
+
+        attempts.ShouldBe(2);
+        exception.MaxRetries.ShouldBe(2);
+        exception.Attempts.Count.ShouldBe(2);
+        exception.Attempts.All(e => e is HttpRequestException { StatusCode: HttpStatusCode.NotFound }).ShouldBeTrue();
+        exception.InnerException.ShouldBe(exception.Attempts[^1]);
     }
 }

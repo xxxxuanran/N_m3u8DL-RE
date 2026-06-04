@@ -15,6 +15,7 @@ using Spectre.Console;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Pipes;
+using System.Net;
 using System.Text;
 using System.Threading.Tasks.Dataflow;
 using N_m3u8DL_RE.Enum;
@@ -1088,36 +1089,18 @@ internal class SimpleLiveRecordManager2
                 // 刷新列表
                 if (!STOP_FLAG)
                 {
-                    // P2-3：刷新失败健壮化。瞬时刷新错误（断网/超时/CDN 抖动）不应终止整个录制，
-                    // 也不应推进任何状态——记一条 WARN 后跳过本轮，等待下一轮重试；
-                    // 网络恢复后高水位号缺口检测会把空档识别为缺口并补齐。
-                    try
-                    {
-                        await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList(), CancellationTokenSource.Token);
-                        DisableLiveSynthesisForImplicitIV();
-                        await UpdateRawM3u8Async();
-                    }
-                    catch (OperationCanceledException) when (CancellationTokenSource.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (OperationCanceledException refreshEx)
-                    {
-                        Logger.WarnMarkUp($"[darkorange3_1]Playlist refresh timed out transiently, will retry next round: {refreshEx.Message.EscapeMarkup()}[/]");
-                    }
-                    catch (Exception refreshEx)
-                    {
-                        Logger.WarnMarkUp($"[darkorange3_1]Playlist refresh failed transiently, will retry next round: {refreshEx.Message.EscapeMarkup()}[/]");
-                    }
+                    await StreamExtractor.RefreshPlayListAsync(dic.Keys.ToList(), CancellationTokenSource.Token);
+                    DisableLiveSynthesisForImplicitIV();
+                    await UpdateRawM3u8Async();
                 }
             }
             catch (OperationCanceledException oce) when (oce.CancellationToken == CancellationTokenSource.Token)
             {
                 // 不需要做事
             }
-            catch (Exception e)
+            catch (Exception e) when (TryGetTerminalLivePlaylistRefreshReason(e, out var reason))
             {
-                Logger.ErrorMarkUp(e);
+                Logger.WarnMarkUp($"[darkorange3_1]Live playlist refresh failed after retry limit ({reason}). Stop recording.[/]");
                 STOP_FLAG = true;
                 // 停止所有Block
                 foreach (var target in BlockDic.Values)
@@ -1125,7 +1108,55 @@ internal class SimpleLiveRecordManager2
                     target.Complete();
                 }
             }
+            catch (Exception e)
+            {
+                Logger.WarnMarkUp($"[grey]Live playlist refresh failed: {e.Message.EscapeMarkup()}[/]");
+            }
         }
+    }
+
+    private static bool TryGetTerminalLivePlaylistRefreshReason(Exception exception, out string reason)
+    {
+        reason = string.Empty;
+        if (exception is not WebRequestRetryException retryException
+            || retryException.MaxRetries < 5
+            || retryException.Attempts.Count < retryException.MaxRetries)
+        {
+            return false;
+        }
+
+        if (retryException.Attempts.All(IsHttpNotFoundException))
+        {
+            reason = $"media playlist returned HTTP 404 for {retryException.MaxRetries} consecutive attempts";
+            return true;
+        }
+
+        if (retryException.Attempts.All(IsHttpTimeoutException))
+        {
+            reason = $"media playlist timed out for {retryException.MaxRetries} consecutive attempts";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsHttpNotFoundException(Exception exception)
+    {
+        return EnumerateExceptionChain(exception)
+            .OfType<HttpRequestException>()
+            .Any(e => e.StatusCode == HttpStatusCode.NotFound);
+    }
+
+    private static bool IsHttpTimeoutException(Exception exception)
+    {
+        return EnumerateExceptionChain(exception)
+            .Any(e => e is TimeoutException or TaskCanceledException or OperationCanceledException);
+    }
+
+    private static IEnumerable<Exception> EnumerateExceptionChain(Exception exception)
+    {
+        for (var current = exception; current != null; current = current.InnerException)
+            yield return current;
     }
 
     private async Task UpdateRawM3u8Async()

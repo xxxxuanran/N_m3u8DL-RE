@@ -4,6 +4,13 @@ using Spectre.Console;
 
 namespace N_m3u8DL_RE.Common.Util;
 
+public sealed class WebRequestRetryException(string message, IReadOnlyList<Exception> attempts, int maxRetries)
+    : Exception(message, attempts.LastOrDefault())
+{
+    public IReadOnlyList<Exception> Attempts { get; } = attempts;
+    public int MaxRetries { get; } = maxRetries;
+}
+
 public static class RetryUtil
 {
     public static async Task<T?> WebRequestRetryAsync<T>(
@@ -15,7 +22,7 @@ public static class RetryUtil
     {
         var retryCount = 0;
         var result = default(T);
-        Exception currentException = new();
+        var exceptions = new List<Exception>();
 
         while (retryCount < maxRetries)
         {
@@ -31,7 +38,7 @@ public static class RetryUtil
             }
             catch (Exception ex) when (IsTransientWebRequestException(ex))
             {
-                currentException = ex;
+                exceptions.Add(ex);
                 retryCount++;
                 Logger.WarnMarkUp($"[grey]{ex.Message.EscapeMarkup()} ({retryCount}/{maxRetries})[/]");
                 await Task.Delay(retryDelayMilliseconds + (retryDelayIncrementMilliseconds * (retryCount - 1)), cancellationToken);
@@ -40,7 +47,7 @@ public static class RetryUtil
 
         if (retryCount == maxRetries)
         {
-            throw new Exception($"Failed to execute action after {maxRetries} retries.", currentException);
+            throw new WebRequestRetryException($"Failed to execute action after {maxRetries} retries.", exceptions, maxRetries);
         }
 
         return result;
