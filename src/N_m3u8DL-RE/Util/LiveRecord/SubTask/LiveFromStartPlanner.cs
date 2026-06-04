@@ -2,6 +2,21 @@ namespace N_m3u8DL_RE.Util.LiveRecord.SubTask;
 
 internal static class LiveFromStartPlanner
 {
+    public readonly record struct FuzzyBoundaryPlan(
+        long FillStart,
+        long ExploreFloor,
+        long ExploreUpper,
+        bool HasExploreRange);
+
+    public static FuzzyBoundaryPlan PlanFuzzyBoundary(long windowLower, long windowUpper)
+    {
+        return new FuzzyBoundaryPlan(
+            FillStart: windowUpper,
+            ExploreFloor: windowLower,
+            ExploreUpper: windowUpper - 1,
+            HasExploreRange: windowUpper - 1 >= windowLower);
+    }
+
     public static double ResolveProbeTimeoutSec(int waitSec, double httpRequestTimeoutSec)
     {
         var probeTimeoutSec = Math.Clamp(waitSec * 2d, 2d, 5d);

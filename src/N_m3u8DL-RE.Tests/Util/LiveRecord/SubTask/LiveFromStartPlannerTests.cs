@@ -5,6 +5,28 @@ namespace N_m3u8DL_RE.Tests.Util.LiveRecord.SubTask;
 
 public class LiveFromStartPlannerTests
 {
+    [Fact]
+    public void PlanFuzzyBoundary_AssignsBoundaryPointToAscendingFill()
+    {
+        var plan = LiveFromStartPlanner.PlanFuzzyBoundary(613351018, 613351049);
+
+        plan.FillStart.ShouldBe(613351049);
+        plan.ExploreFloor.ShouldBe(613351018);
+        plan.ExploreUpper.ShouldBe(613351048);
+        plan.HasExploreRange.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void PlanFuzzyBoundary_SinglePointWindow_HasNoDescendingExploreRange()
+    {
+        var plan = LiveFromStartPlanner.PlanFuzzyBoundary(100, 100);
+
+        plan.FillStart.ShouldBe(100);
+        plan.ExploreFloor.ShouldBe(100);
+        plan.ExploreUpper.ShouldBe(99);
+        plan.HasExploreRange.ShouldBeFalse();
+    }
+
     [Theory]
     [InlineData(1, 100d, 2d)]
     [InlineData(3, 100d, 5d)]
