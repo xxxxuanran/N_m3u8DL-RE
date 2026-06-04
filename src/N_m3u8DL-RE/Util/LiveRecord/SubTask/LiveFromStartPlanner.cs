@@ -7,6 +7,7 @@ internal static class LiveFromStartPlanner
 {
     public const long MaxProbeDepth = 3600;
     public static readonly TimeSpan InitialTimeoutBatchCompletionWindow = TimeSpan.FromSeconds(1);
+    private const double MinProbeTimeoutSec = 2d;
 
     public readonly record struct FuzzyBoundaryPlan(
         long FillStart,
@@ -23,10 +24,17 @@ internal static class LiveFromStartPlanner
             HasExploreRange: windowUpper - 1 >= windowLower);
     }
 
-    public static double ResolveProbeTimeoutSec(int waitSec, double httpRequestTimeoutSec)
+    public static double ResolveProbeTimeoutSec(int waitSec, int totalHostCount, double httpRequestTimeoutSec)
     {
-        var probeTimeoutSec = Math.Clamp(waitSec * 2d, 2d, 5d);
-        return BoundTimeoutToHttpRequestTimeout(probeTimeoutSec, httpRequestTimeoutSec);
+        if (double.IsFinite(httpRequestTimeoutSec) && httpRequestTimeoutSec > 0 && httpRequestTimeoutSec < MinProbeTimeoutSec)
+            return httpRequestTimeoutSec;
+
+        var calculatedTimeoutSec = Math.Max(1, waitSec) * Math.Max(1, totalHostCount) / 2d;
+        var maxTimeoutSec = double.IsFinite(httpRequestTimeoutSec) && httpRequestTimeoutSec > 0
+            ? httpRequestTimeoutSec
+            : double.PositiveInfinity;
+
+        return Math.Clamp(calculatedTimeoutSec, MinProbeTimeoutSec, maxTimeoutSec);
     }
 
     public static long ResolveProbeFloor(long topAvailableSentinel, long floor)
@@ -103,11 +111,4 @@ internal static class LiveFromStartPlanner
             : latestBatchNumber + safeStep;
     }
 
-    private static double BoundTimeoutToHttpRequestTimeout(double timeoutSec, double httpRequestTimeoutSec)
-    {
-        if (!double.IsFinite(httpRequestTimeoutSec) || httpRequestTimeoutSec <= 0)
-            return timeoutSec;
-
-        return Math.Min(timeoutSec, httpRequestTimeoutSec);
-    }
 }

@@ -29,13 +29,20 @@ public class LiveFromStartPlannerTests
     }
 
     [Theory]
-    [InlineData(1, 100d, 2d)]
-    [InlineData(3, 100d, 5d)]
-    [InlineData(10, 100d, 5d)]
-    [InlineData(10, 3d, 3d)]
-    public void ResolveProbeTimeoutSec_ClampsByProbeRangeAndHttpRequestTimeout(int waitSec, double httpRequestTimeoutSec, double expected)
+    [InlineData(1, 1, 100d, 2d)]
+    [InlineData(1, 5, 100d, 2.5d)]
+    [InlineData(2, 8, 100d, 8d)]
+    [InlineData(3, 8, 100d, 12d)]
+    [InlineData(3, 8, 10d, 10d)]
+    [InlineData(1, 5, 1d, 1d)]
+    [InlineData(1, 0, 100d, 2d)]
+    public void ResolveProbeTimeoutSec_UsesTotalHostCountAndHonorsHttpRequestTimeout(
+        int waitSec,
+        int totalHostCount,
+        double httpRequestTimeoutSec,
+        double expected)
     {
-        LiveFromStartPlanner.ResolveProbeTimeoutSec(waitSec, httpRequestTimeoutSec).ShouldBe(expected);
+        LiveFromStartPlanner.ResolveProbeTimeoutSec(waitSec, totalHostCount, httpRequestTimeoutSec).ShouldBe(expected);
     }
 
     [Theory]

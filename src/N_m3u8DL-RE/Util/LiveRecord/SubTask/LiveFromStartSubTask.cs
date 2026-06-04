@@ -246,12 +246,15 @@ internal sealed class LiveFromStartSubTask(
                 HostMirrors: subTaskHostMirrors);
 
             var downloadCache = new ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)>();
-            var liveSegmentTimeoutSec = ResolveLiveFromStartSegmentTimeoutSec(subTaskParallelism, ctx.SegmentDuration);
-            Logger.InfoMarkUp(LiveMarkUp("liveFromStartTimeoutDecision"), streamLabel, subTaskParallelism, FormatDurationSeconds(ctx.SegmentDuration), FormatDurationSeconds(ResolveProbeTimeoutSec()), FormatDurationSeconds(liveSegmentTimeoutSec));
+            var httpRequestTimeoutSec = ResolveHttpRequestTimeoutSec();
+            var subTaskHostCount = 1 + ctx.HostMirrors.Length;
+            var probeTimeoutSec = LiveFromStartPlanner.ResolveProbeTimeoutSec(getWaitSec(), subTaskHostCount, httpRequestTimeoutSec);
+            var liveSegmentTimeoutSec = LiveFromStartPlanner.ResolveSegmentTimeoutSec(subTaskParallelism, ctx.SegmentDuration, probeTimeoutSec, httpRequestTimeoutSec);
+            Logger.InfoMarkUp(LiveMarkUp("liveFromStartTimeoutDecision"), streamLabel, subTaskParallelism, FormatDurationSeconds(ctx.SegmentDuration), FormatDurationSeconds(probeTimeoutSec), FormatDurationSeconds(liveSegmentTimeoutSec));
 
             Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocatingEarliest"), firstNumber, streamLabel);
 
-            var locateResult = await LocateEarliestAvailableNumberAsync(ctx, firstNumber, 0, subTaskParallelism, downloadCache, backfillCts.Token);
+            var locateResult = await LocateEarliestAvailableNumberAsync(ctx, firstNumber, 0, subTaskParallelism, probeTimeoutSec, downloadCache, backfillCts.Token);
             var upper = firstNumber - 1;
 
             if (locateResult.UseDescending)
@@ -1059,6 +1062,7 @@ internal sealed class LiveFromStartSubTask(
         long topAvailableSentinel,
         long floor,
         int parallelism,
+        double probeTimeoutSec,
         ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
         CancellationToken cancellationToken)
     {
@@ -1073,7 +1077,7 @@ internal sealed class LiveFromStartSubTask(
         {
             probeCount++;
             Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeChecking"), probeCount, phase, number);
-            var (_, result) = await ProbeNumberAsync(ctx, cache, number, cancellationToken);
+            var (_, result) = await ProbeNumberAsync(ctx, cache, number, probeTimeoutSec, cancellationToken);
             if (!string.IsNullOrWhiteSpace(result?.RequestUrl))
                 lastRequestUrl = result.RequestUrl;
 
@@ -1210,6 +1214,7 @@ internal sealed class LiveFromStartSubTask(
         LiveSubTaskDownloadContext ctx,
         ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)> cache,
         long number,
+        double probeTimeoutSec,
         CancellationToken cancellationToken)
     {
         if (cache.TryGetValue(number, out var cached))
@@ -1232,7 +1237,6 @@ internal sealed class LiveFromStartSubTask(
 
         var path = subTaskDownloader.GetSegmentPath(ctx, candidate);
 
-        var probeTimeoutSec = ResolveProbeTimeoutSec();
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(probeTimeoutSec));
         var (_, result) = await subTaskDownloader.DownloadRawAsync(candidate, path, ctx.SpeedContainer, ctx.Headers, timeoutCts.Token, ctx.RetryCount, ctx.HostMirrors);
@@ -1261,21 +1265,6 @@ internal sealed class LiveFromStartSubTask(
         var value = await action(timeoutCts.Token);
         var timedOut = timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
         return new LiveSegmentTimedResult<T>(value, timedOut, DateTimeOffset.UtcNow);
-    }
-
-    /// <summary>探测超时仍保留短 deadline，但尊重全局 HTTP 超时作为硬上限。</summary>
-    private double ResolveProbeTimeoutSec()
-    {
-        return LiveFromStartPlanner.ResolveProbeTimeoutSec(getWaitSec(), ResolveHttpRequestTimeoutSec());
-    }
-
-    /// <summary>live-from-start 历史分片下载超时：targetDuration * 并发 * 2，并限制在 [probeTimeout, --http-request-timeout] 内。</summary>
-    private double ResolveLiveFromStartSegmentTimeoutSec(int parallelism, double targetDurationSeconds)
-    {
-        var td = double.IsFinite(targetDurationSeconds) && targetDurationSeconds > 0 ? targetDurationSeconds : 1d;
-        var probeTimeoutSec = ResolveProbeTimeoutSec();
-        var httpTimeoutSec = ResolveHttpRequestTimeoutSec();
-        return LiveFromStartPlanner.ResolveSegmentTimeoutSec(parallelism, td, probeTimeoutSec, httpTimeoutSec);
     }
 
     /// <summary>读取全局 HTTP 超时；Program 会把 --http-request-timeout 写入 HTTPUtil.AppHttpClient.Timeout。</summary>
