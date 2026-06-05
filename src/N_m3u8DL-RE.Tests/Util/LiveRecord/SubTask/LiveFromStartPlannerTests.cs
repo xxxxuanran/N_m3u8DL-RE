@@ -75,36 +75,36 @@ public class LiveFromStartPlannerTests
     }
 
     [Fact]
-    public void ResolveInitialAscendingLogicalBatchEnd_CountsCachedLowerAsInitialBatchSlot()
+    public void ResolveAscendingFastForwardBatchEnd_CountsCachedLowerAsBatchSlot()
     {
-        LiveFromStartPlanner.ResolveInitialAscendingLogicalBatchEnd(613394737, 6).ShouldBe(613394742);
+        LiveFromStartPlanner.ResolveAscendingFastForwardBatchEnd(613394737, 6).ShouldBe(613394742);
     }
 
     [Fact]
-    public void TryResolveInitialTimeoutFastForwardLatestFailure_WithPredictableContinuousSegments_ReturnsLatestFailure()
+    public void TryResolveTimeoutFastForwardLatestFailure_WithPredictableContinuousSegments_ReturnsLatestFailure()
     {
         var timeoutSegments = Enumerable.Range(613394738, 5)
             .Select(number => Segment(number))
             .ToList();
 
-        LiveFromStartPlanner.TryResolveInitialTimeoutFastForwardLatestFailure(timeoutSegments, out var latestFailure).ShouldBeTrue();
+        LiveFromStartPlanner.TryResolveTimeoutFastForwardLatestFailure(timeoutSegments, out var latestFailure).ShouldBeTrue();
         latestFailure.ShouldBe(613394742);
 
-        var step = LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStep(12d, 1d);
+        var step = LiveFromStartPlanner.ResolveTimeoutFastForwardStep(12d, 1d);
         step.ShouldBe(12);
-        LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStart(latestFailure, step).ShouldBe(613394754);
+        LiveFromStartPlanner.ResolveTimeoutFastForwardStart(latestFailure, step).ShouldBe(613394754);
     }
 
     [Fact]
-    public void TryResolveInitialTimeoutFastForwardLatestFailure_RejectsGappedSegments()
+    public void TryResolveTimeoutFastForwardLatestFailure_RejectsGappedSegments()
     {
         var timeoutSegments = new[] { Segment(613394738), Segment(613394740) };
 
-        LiveFromStartPlanner.TryResolveInitialTimeoutFastForwardLatestFailure(timeoutSegments, out _).ShouldBeFalse();
+        LiveFromStartPlanner.TryResolveTimeoutFastForwardLatestFailure(timeoutSegments, out _).ShouldBeFalse();
     }
 
     [Fact]
-    public void TryResolveInitialTimeoutFastForwardLatestFailure_RejectsUnpredictableUrls()
+    public void TryResolveTimeoutFastForwardLatestFailure_RejectsUnpredictableUrls()
     {
         var timeoutSegments = new[]
         {
@@ -112,7 +112,7 @@ public class LiveFromStartPlannerTests
             new MediaSegment { Index = 613394739, Duration = 1, Url = "https://example.test/live/613394740.m4s" }
         };
 
-        LiveFromStartPlanner.TryResolveInitialTimeoutFastForwardLatestFailure(timeoutSegments, out _).ShouldBeFalse();
+        LiveFromStartPlanner.TryResolveTimeoutFastForwardLatestFailure(timeoutSegments, out _).ShouldBeFalse();
     }
 
     [Theory]
@@ -120,12 +120,27 @@ public class LiveFromStartPlannerTests
     [InlineData(12d, 2d, 6)]
     [InlineData(12d, 5d, 3)]
     [InlineData(12d, 0d, 12)]
-    public void ResolveInitialTimeoutFastForwardStep_UsesSegmentTimeoutOverTargetDuration(
+    public void ResolveTimeoutFastForwardStep_UsesSegmentTimeoutOverTargetDuration(
         double segmentTimeoutSec,
         double targetDurationSec,
         long expected)
     {
-        LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStep(segmentTimeoutSec, targetDurationSec).ShouldBe(expected);
+        LiveFromStartPlanner.ResolveTimeoutFastForwardStep(segmentTimeoutSec, targetDurationSec).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void ResolveTimeoutFastForwardStep_AddsLocateStaleCompensation()
+    {
+        LiveFromStartPlanner.ResolveTimeoutFastForwardStep(12d, 1d, 30d).ShouldBe(42);
+    }
+
+    [Fact]
+    public void ResolveLocateStaleSeconds_ReturnsSecondsSinceLastAvailableProbe()
+    {
+        var lastAvailableAt = new DateTimeOffset(2026, 6, 5, 1, 0, 22, TimeSpan.Zero);
+        var backfillStartAt = lastAvailableAt.AddSeconds(30.5);
+
+        LiveFromStartPlanner.ResolveLocateStaleSeconds(lastAvailableAt, backfillStartAt).ShouldBe(30.5d);
     }
 
     private static MediaSegment Segment(long number)

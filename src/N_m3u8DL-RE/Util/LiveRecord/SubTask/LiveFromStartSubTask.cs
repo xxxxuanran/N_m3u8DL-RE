@@ -60,7 +60,8 @@ internal sealed class LiveFromStartSubTask(
         string? LastRequestUrl,
         bool UseDescending,
         long? FuzzyWindowLower,
-        long? FuzzyWindowUpper);
+        long? FuzzyWindowUpper,
+        DateTimeOffset? LastAvailableAt);
 
     /// <summary>升序抢救主区间的结果集合，最终由汇总阶段按最高不可填洞裁剪为可连接直播边缘的连续尾段。</summary>
     private sealed record AscendingBackfillResult(
@@ -256,6 +257,7 @@ internal sealed class LiveFromStartSubTask(
 
             var locateResult = await LocateEarliestAvailableNumberAsync(ctx, firstNumber, 0, subTaskParallelism, probeTimeoutSec, downloadCache, backfillCts.Token);
             var upper = firstNumber - 1;
+            var firstFastForwardExtraSec = LiveFromStartPlanner.ResolveLocateStaleSeconds(locateResult.LastAvailableAt, DateTimeOffset.UtcNow);
 
             if (locateResult.UseDescending)
             {
@@ -290,7 +292,8 @@ internal sealed class LiveFromStartSubTask(
                     request.FileDic,
                     downloadCache,
                     backfillCts,
-                    liveSegmentTimeoutSec);
+                    liveSegmentTimeoutSec,
+                    firstFastForwardExtraSec);
                 return;
             }
 
@@ -307,7 +310,8 @@ internal sealed class LiveFromStartSubTask(
                 request.FileDic,
                 downloadCache,
                 backfillCts,
-                liveSegmentTimeoutSec);
+                liveSegmentTimeoutSec,
+                firstFastForwardExtraSec);
 
             LogAndFinalizeAscendingBackfill(
                 task,
@@ -341,7 +345,8 @@ internal sealed class LiveFromStartSubTask(
         ConcurrentDictionary<MediaSegment, DownloadResult?> fileDic,
         ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
         CancellationTokenSource backfillCts,
-        double segmentTimeoutSec)
+        double segmentTimeoutSec,
+        double firstFastForwardExtraSec)
     {
         var exploreRange = fuzzyExploreUpper >= fuzzyLower
             ? FormatRange(fuzzyLower, fuzzyExploreUpper)
@@ -384,7 +389,8 @@ internal sealed class LiveFromStartSubTask(
             downloadCache,
             backfillCts,
             segmentTimeoutSec,
-            onInitialTimeoutFastForward: () =>
+            firstFastForwardExtraSec,
+            onTimeoutFastForward: () =>
             {
                 if (exploreCts.IsCancellationRequested)
                     return;
@@ -484,7 +490,8 @@ internal sealed class LiveFromStartSubTask(
         ConcurrentDictionary<long, (MediaSegment? Segment, DownloadResult? Result)> downloadCache,
         CancellationTokenSource backfillCts,
         double segmentTimeoutSec,
-        Action? onInitialTimeoutFastForward = null)
+        double firstFastForwardExtraSec = 0d,
+        Action? onTimeoutFastForward = null)
     {
         var cancellationToken = backfillCts.Token;
         var nextDispatch = lower;
@@ -497,23 +504,23 @@ internal sealed class LiveFromStartSubTask(
         var dispatchCount = 0;
         var cacheReuseCount = 0;
         var discardedCleanupCount = 0;
-        var initialLogicalBatchEnd = LiveFromStartPlanner.ResolveInitialAscendingLogicalBatchEnd(lower, parallelism);
-        var initialActualNumbers = new HashSet<long>();
-        var initialActualResults = new Dictionary<long, AscendingResolved>();
-        long? initialAnchorNumber = null;
-        var initialFastForwardPending = true;
-        var initialFastForwardEvaluated = false;
+        var fastForwardBatchEnd = LiveFromStartPlanner.ResolveAscendingFastForwardBatchEnd(lower, parallelism);
+        var fastForwardActualNumbers = new HashSet<long>();
+        var fastForwardActualResults = new Dictionary<long, AscendingResolved>();
+        long? fastForwardAnchorNumber = null;
+        var fastForwardActive = true;
+        var fastForwardCycle = 1;
 
         Logger.InfoMarkUp(LiveMarkUp("liveFromStartAscendingStart"), streamLabel, FormatRange(lower, upper), parallelism, FormatDurationSeconds(segmentTimeoutSec));
 
         while (!isStopping() && !cancellationToken.IsCancellationRequested && nextCommit <= upper)
         {
             while (inFlight.Count < parallelism && nextDispatch <= upper
-                   && !ShouldHoldInitialFastForwardDispatch()
+                   && !ShouldHoldFastForwardDispatch()
                    && !isStopping() && !cancellationToken.IsCancellationRequested)
             {
                 var number = nextDispatch;
-                var isInitialLogicalSlot = initialFastForwardPending && number <= initialLogicalBatchEnd;
+                var isFastForwardBatchSlot = fastForwardActive && number <= fastForwardBatchEnd;
                 if (downloadCache.TryGetValue(number, out var cached))
                 {
                     resolved[number] = new AscendingResolved(cached.Segment, cached.Result, TimedOut: false, DateTimeOffset.UtcNow);
@@ -525,18 +532,18 @@ internal sealed class LiveFromStartSubTask(
                         token => subTaskDownloader.DownloadAsync(ctx, number, token),
                         cancellationToken,
                         segmentTimeoutSec);
-                    if (isInitialLogicalSlot)
+                    if (isFastForwardBatchSlot)
                     {
-                        initialActualNumbers.Add(number);
-                        initialAnchorNumber ??= number;
+                        fastForwardActualNumbers.Add(number);
+                        fastForwardAnchorNumber ??= number;
                     }
                     dispatchCount++;
                 }
                 nextDispatch++;
             }
 
-            if (initialFastForwardPending && nextDispatch > initialLogicalBatchEnd && initialActualNumbers.Count == 0)
-                initialFastForwardPending = false;
+            if (fastForwardActive && nextDispatch > fastForwardBatchEnd && fastForwardActualNumbers.Count == 0)
+                fastForwardActive = false;
 
             while (resolved.Remove(nextCommit, out var done))
             {
@@ -559,7 +566,7 @@ internal sealed class LiveFromStartSubTask(
                 nextCommit++;
             }
 
-            TryApplyInitialTimeoutFastForward();
+            TryApplyTimeoutFastForward();
 
             if (nextCommit > upper)
                 break;
@@ -578,8 +585,8 @@ internal sealed class LiveFromStartSubTask(
             var doneResult = timedResult.Value;
             var ascendingResolved = new AscendingResolved(doneResult.Segment, doneResult.Result, timedResult.TimedOut, timedResult.CompletedAt);
             resolved[finishedNumber] = ascendingResolved;
-            if (initialActualNumbers.Contains(finishedNumber))
-                initialActualResults[finishedNumber] = ascendingResolved;
+            if (fastForwardActualNumbers.Contains(finishedNumber))
+                fastForwardActualResults[finishedNumber] = ascendingResolved;
         }
 
         var stopReason = ResolveAscendingStopReason(nextCommit, upper, inFlight.Count, nextDispatch, cancellationToken);
@@ -616,44 +623,55 @@ internal sealed class LiveFromStartSubTask(
             dispatchCount,
             discardedCleanupCount);
 
-        bool ShouldHoldInitialFastForwardDispatch()
+        bool ShouldHoldFastForwardDispatch()
         {
-            return initialFastForwardPending && nextDispatch > initialLogicalBatchEnd;
+            return fastForwardActive && nextDispatch > fastForwardBatchEnd;
         }
 
-        void TryApplyInitialTimeoutFastForward()
+        void TryApplyTimeoutFastForward()
         {
-            if (!initialFastForwardPending || initialFastForwardEvaluated || initialAnchorNumber == null
-                || initialActualResults.Count < initialActualNumbers.Count)
+            if (!fastForwardActive || fastForwardAnchorNumber == null
+                || fastForwardActualResults.Count < fastForwardActualNumbers.Count)
             {
                 return;
             }
 
-            initialFastForwardPending = false;
-            initialFastForwardEvaluated = true;
-
-            if (!initialActualResults.TryGetValue(initialAnchorNumber.Value, out var anchor)
+            if (!fastForwardActualResults.TryGetValue(fastForwardAnchorNumber.Value, out var anchor)
                 || anchor.Result is { Success: true }
                 || !anchor.TimedOut
                 || anchor.Segment == null)
             {
+                fastForwardActive = false;
                 return;
             }
 
-            var timeoutSpan = BuildInitialTimeoutSegmentSpan(initialAnchorNumber.Value, anchor.CompletedAt);
-            var timeoutSegments = timeoutSpan.Select(item => item.Segment).ToList();
-            if (!LiveFromStartPlanner.TryResolveInitialTimeoutFastForwardLatestFailure(timeoutSegments, out var latestFailure))
+            var timeoutSpan = BuildTimeoutSegmentSpan(fastForwardAnchorNumber.Value, anchor.CompletedAt);
+            if (timeoutSpan.Count != fastForwardActualNumbers.Count)
+            {
+                fastForwardActive = false;
                 return;
+            }
+
+            var timeoutSegments = timeoutSpan.Select(item => item.Segment).ToList();
+            if (!LiveFromStartPlanner.TryResolveTimeoutFastForwardLatestFailure(timeoutSegments, out var latestFailure))
+            {
+                fastForwardActive = false;
+                return;
+            }
 
             var completionSpan = timeoutSpan.Count > 0
                 ? timeoutSpan.Max(item => item.CompletedAt) - timeoutSpan.Min(item => item.CompletedAt)
                 : TimeSpan.Zero;
-            var step = LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStep(segmentTimeoutSec, ctx.SegmentDuration);
-            var desiredJumpStart = LiveFromStartPlanner.ResolveInitialTimeoutFastForwardStart(latestFailure, step);
+            var extraCompensationSec = fastForwardCycle == 1 ? firstFastForwardExtraSec : 0d;
+            var step = LiveFromStartPlanner.ResolveTimeoutFastForwardStep(segmentTimeoutSec, ctx.SegmentDuration, extraCompensationSec);
+            var desiredJumpStart = LiveFromStartPlanner.ResolveTimeoutFastForwardStart(latestFailure, step);
             var upperExclusive = upper == long.MaxValue ? long.MaxValue : upper + 1;
             var jumpStart = Math.Min(desiredJumpStart, upperExclusive);
             if (jumpStart <= nextCommit)
+            {
+                fastForwardActive = false;
                 return;
+            }
 
             var skippedStart = nextCommit;
             var skippedEnd = jumpStart - 1;
@@ -664,21 +682,34 @@ internal sealed class LiveFromStartSubTask(
             if (nextDispatch < jumpStart)
                 nextDispatch = jumpStart;
 
-            onInitialTimeoutFastForward?.Invoke();
+            onTimeoutFastForward?.Invoke();
 
             Logger.InfoMarkUp(
                 LiveMarkUp("liveFromStartAscendingInitialTimeoutFastForward"),
                 streamLabel,
+                fastForwardCycle,
                 FormatRange(timeoutSegments[0].Index, latestFailure),
                 FormatDurationSeconds(segmentTimeoutSec),
                 FormatDurationSeconds(completionSpan.TotalSeconds),
                 FormatDurationSeconds(ctx.SegmentDuration),
+                FormatDurationSeconds(extraCompensationSec),
                 step,
                 FormatRange(skippedStart, skippedEnd),
                 jumpStart);
+
+            fastForwardCycle++;
+            ResetFastForwardBatch(jumpStart);
         }
 
-        List<(MediaSegment Segment, DateTimeOffset CompletedAt)> BuildInitialTimeoutSegmentSpan(long anchorNumber, DateTimeOffset anchorCompletedAt)
+        void ResetFastForwardBatch(long batchStart)
+        {
+            fastForwardBatchEnd = LiveFromStartPlanner.ResolveAscendingFastForwardBatchEnd(batchStart, parallelism);
+            fastForwardActualNumbers.Clear();
+            fastForwardActualResults.Clear();
+            fastForwardAnchorNumber = null;
+        }
+
+        List<(MediaSegment Segment, DateTimeOffset CompletedAt)> BuildTimeoutSegmentSpan(long anchorNumber, DateTimeOffset anchorCompletedAt)
         {
             var selected = new List<(MediaSegment Segment, DateTimeOffset CompletedAt)>();
             var minCompletedAt = anchorCompletedAt;
@@ -686,7 +717,7 @@ internal sealed class LiveFromStartSubTask(
 
             for (var number = anchorNumber; number <= upper; number++)
             {
-                if (!initialActualResults.TryGetValue(number, out var done)
+                if (!fastForwardActualResults.TryGetValue(number, out var done)
                     || done.Result is { Success: true }
                     || !done.TimedOut
                     || done.Segment == null)
@@ -696,7 +727,7 @@ internal sealed class LiveFromStartSubTask(
 
                 var nextMinCompletedAt = done.CompletedAt < minCompletedAt ? done.CompletedAt : minCompletedAt;
                 var nextMaxCompletedAt = done.CompletedAt > maxCompletedAt ? done.CompletedAt : maxCompletedAt;
-                if (nextMaxCompletedAt - nextMinCompletedAt > LiveFromStartPlanner.InitialTimeoutBatchCompletionWindow)
+                if (nextMaxCompletedAt - nextMinCompletedAt > LiveFromStartPlanner.TimeoutFastForwardCompletionWindow)
                     break;
 
                 selected.Add((done.Segment, done.CompletedAt));
@@ -1068,6 +1099,7 @@ internal sealed class LiveFromStartSubTask(
     {
         var probeCount = 0;
         string? lastRequestUrl = null;
+        DateTimeOffset? lastAvailableAt = null;
 
         var probeFloor = LiveFromStartPlanner.ResolveProbeFloor(topAvailableSentinel, floor);
 
@@ -1083,6 +1115,7 @@ internal sealed class LiveFromStartSubTask(
 
             if (result is { Success: true })
             {
+                lastAvailableAt = DateTimeOffset.UtcNow;
                 var host = TryParseUrlAuthority(result.RequestUrl)?.Host;
                 if (host != null)
                     Logger.InfoMarkUp(LiveMarkUp("liveFromStartProbeAvailableOnHost"), probeCount, number, host.EscapeMarkup());
@@ -1123,13 +1156,13 @@ internal sealed class LiveFromStartSubTask(
                 if (failedDepth == 1)
                 {
                     Logger.InfoMarkUp(LiveMarkUp("liveFromStartImmediateUnavailable"), probe);
-                    return new LocateResult(null, lastRequestUrl, false, null, null);
+                    return new LocateResult(null, lastRequestUrl, false, null, null, lastAvailableAt);
                 }
 
                 if (lastAvailableDepth <= 60)
                 {
                     Logger.InfoMarkUp(LiveMarkUp("liveFromStartShallowAvailable"), failedDepth, lastAvailableDepth);
-                    return new LocateResult(null, lastRequestUrl, true, null, null);
+                    return new LocateResult(null, lastRequestUrl, true, null, null, lastAvailableAt);
                 }
                 Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateFirstUnavailable"), firstUnavailable.Value, firstUnavailable.Value + 1, lastAvailable);
                 break;
@@ -1139,7 +1172,7 @@ internal sealed class LiveFromStartSubTask(
         if (isStopping() || cancellationToken.IsCancellationRequested)
         {
             Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateCancelledBeforeWindow"));
-            return new LocateResult(null, lastRequestUrl, false, null, null);
+            return new LocateResult(null, lastRequestUrl, false, null, null, lastAvailableAt);
         }
 
         long lo;
@@ -1149,7 +1182,7 @@ internal sealed class LiveFromStartSubTask(
             if (lastAvailable >= topAvailableSentinel)
             {
                 Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateNoEarlierConfirmed"), topAvailableSentinel);
-                return new LocateResult(null, lastRequestUrl, false, null, null);
+                return new LocateResult(null, lastRequestUrl, false, null, null, lastAvailableAt);
             }
             lo = probeFloor;
             hi = lastAvailable;
@@ -1160,7 +1193,7 @@ internal sealed class LiveFromStartSubTask(
             if (lastAvailable >= topAvailableSentinel)
             {
                 Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateUnavailableBeforeAvailable"));
-                return new LocateResult(null, lastRequestUrl, false, null, null);
+                return new LocateResult(null, lastRequestUrl, false, null, null, lastAvailableAt);
             }
             lo = firstUnavailable.Value + 1;
             hi = lastAvailable;
@@ -1193,17 +1226,17 @@ internal sealed class LiveFromStartSubTask(
         if (lo < hi && !isStopping() && !cancellationToken.IsCancellationRequested)
         {
             Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateFuzzyWindow"), FormatRange(lo, hi), hi);
-            return new LocateResult(hi, lastRequestUrl, false, lo, hi);
+            return new LocateResult(hi, lastRequestUrl, false, lo, hi, lastAvailableAt);
         }
 
         if (isStopping() || cancellationToken.IsCancellationRequested)
         {
             Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateCancelledNarrowing"));
-            return new LocateResult(null, lastRequestUrl, false, null, null);
+            return new LocateResult(null, lastRequestUrl, false, null, null, lastAvailableAt);
         }
 
         Logger.InfoMarkUp(LiveMarkUp("liveFromStartLocateExactSelected"), lo);
-        return new LocateResult(lo, lastRequestUrl, false, null, null);
+        return new LocateResult(lo, lastRequestUrl, false, null, null, lastAvailableAt);
     }
 
     /// <summary>

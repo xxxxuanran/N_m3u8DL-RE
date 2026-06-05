@@ -6,7 +6,7 @@ namespace N_m3u8DL_RE.Util.LiveRecord.SubTask;
 internal static class LiveFromStartPlanner
 {
     public const long MaxProbeDepth = 3600;
-    public static readonly TimeSpan InitialTimeoutBatchCompletionWindow = TimeSpan.FromSeconds(1);
+    public static readonly TimeSpan TimeoutFastForwardCompletionWindow = TimeSpan.FromSeconds(1);
     private const double MinProbeTimeoutSec = 2d;
 
     public readonly record struct FuzzyBoundaryPlan(
@@ -62,13 +62,13 @@ internal static class LiveFromStartPlanner
         return Math.Clamp(baseTimeoutSec, minTimeoutSec, maxTimeoutSec);
     }
 
-    public static long ResolveInitialAscendingLogicalBatchEnd(long lower, int parallelism)
+    public static long ResolveAscendingFastForwardBatchEnd(long lower, int parallelism)
     {
         var offset = Math.Max(1L, parallelism) - 1;
         return lower > long.MaxValue - offset ? long.MaxValue : lower + offset;
     }
 
-    public static bool TryResolveInitialTimeoutFastForwardLatestFailure(
+    public static bool TryResolveTimeoutFastForwardLatestFailure(
         IReadOnlyList<MediaSegment> timeoutSegments,
         out long latestFailure)
     {
@@ -91,19 +91,31 @@ internal static class LiveFromStartPlanner
         return true;
     }
 
-    public static long ResolveInitialTimeoutFastForwardStep(double segmentTimeoutSec, double targetDurationSeconds)
+    public static double ResolveLocateStaleSeconds(DateTimeOffset? lastAvailableAt, DateTimeOffset backfillStartAt)
     {
-        var timeout = double.IsFinite(segmentTimeoutSec) && segmentTimeoutSec > 0 ? segmentTimeoutSec : 1d;
-        var td = double.IsFinite(targetDurationSeconds) && targetDurationSeconds > 0 ? targetDurationSeconds : 1d;
-        var step = Math.Ceiling(timeout / td);
+        if (lastAvailableAt == null || backfillStartAt <= lastAvailableAt.Value)
+            return 0d;
 
-        if (step >= long.MaxValue)
-            return long.MaxValue;
-
-        return Math.Max(1L, (long)step);
+        return (backfillStartAt - lastAvailableAt.Value).TotalSeconds;
     }
 
-    public static long ResolveInitialTimeoutFastForwardStart(long latestBatchNumber, long step)
+    public static long ResolveTimeoutFastForwardStep(
+        double segmentTimeoutSec,
+        double targetDurationSeconds,
+        double extraCompensationSec = 0d)
+    {
+        var timeout = double.IsFinite(segmentTimeoutSec) && segmentTimeoutSec > 0 ? segmentTimeoutSec : 1d;
+        var extra = double.IsFinite(extraCompensationSec) && extraCompensationSec > 0 ? extraCompensationSec : 0d;
+        var td = double.IsFinite(targetDurationSeconds) && targetDurationSeconds > 0 ? targetDurationSeconds : 1d;
+        var step = Math.Ceiling((timeout + extra) / td);
+
+        if (step >= long.MaxValue || step * 4 >= long.MaxValue)
+            return long.MaxValue;
+
+        return Math.Max(1L, (long)step * 4);
+    }
+
+    public static long ResolveTimeoutFastForwardStart(long latestBatchNumber, long step)
     {
         var safeStep = Math.Max(1L, step);
         return latestBatchNumber > long.MaxValue - safeStep

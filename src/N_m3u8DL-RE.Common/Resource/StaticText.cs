@@ -492,9 +492,9 @@ internal static class StaticText
         ),
         ["liveFromStartAscendingInitialTimeoutFastForward"] = new TextContainer
         (
-            zhCN: "Live from start：{} 的升序回填决策：首批 {} 全部因 {} 超时结束（完成跨度={}，target_duration={}，倍进步长={}）；跳过 {}，下一次派发从 {} 开始。",
-            zhTW: "Live from start：{} 的升序回填決策：首批 {} 全部因 {} 逾時結束（完成跨度={}，target_duration={}，倍進步長={}）；跳過 {}，下一次派發從 {} 開始。",
-            enUS: "Live from start: ascending backfill decision for {}: initial batch {} all ended by {} timeout (completion_span={}, target_duration={}, fast-forward step={}); skipping {}, next dispatch starts at {}."
+            zhCN: "Live from start：{} 的升序回填决策：timeout 倍进 #{}：批次 {} 全部因 {} 超时结束（完成跨度={}，target_duration={}，定位 stale 补偿={}，倍进步长={}）；跳过 {}，下一次派发从 {} 开始。",
+            zhTW: "Live from start：{} 的升序回填決策：timeout 倍進 #{}：批次 {} 全部因 {} 逾時結束（完成跨度={}，target_duration={}，定位 stale 補償={}，倍進步長={}）；跳過 {}，下一次派發從 {} 開始。",
+            enUS: "Live from start: ascending backfill decision for {}: timeout fast-forward #{}: batch {} all ended by {} timeout (completion_span={}, target_duration={}, locate_stale_compensation={}, fast-forward step={}); skipping {}, next dispatch starts at {}."
         ),
         ["liveFromStartAscendingStop"] = new TextContainer
         (
